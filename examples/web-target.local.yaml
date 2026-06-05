@@ -1,0 +1,31 @@
+schemaVersion: web-target/v1
+id: local-demo
+name: Local Demo App
+environment: local
+baseUrl: http://localhost:3000
+allowedHosts:
+  - localhost
+  - 127.0.0.1
+scope:
+  includePaths:
+    - /
+    - /api/*
+  excludePaths:
+    - /billing/charge
+  maxRequests: 25
+  maxRuntimeSeconds: 60
+lifecycle:
+  reset:
+    command: ./scripts/reset-test-db.sh
+    required: true
+  seed:
+    command: ./scripts/seed-test-db.sh
+    required: true
+detectors:
+  enabled:
+    - reflected-xss
+    - authz-idor
+safety:
+  requireLocalOrStaging: true
+  requireAllowedHostMatch: true
+  blockCloudMetadataIps: true

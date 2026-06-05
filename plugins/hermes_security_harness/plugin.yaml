@@ -1,0 +1,12 @@
+name: security-harness
+version: "0.1.0"
+description: Defensive security harness wrapper for authorized static/dynamic checks.
+provides_tools:
+  - security_validate_target
+  - security_status
+  - security_report
+requires_env:
+  - name: SECURITY_HARNESS_CLI
+    description: Absolute path to the security-harness CLI binary.
+  - name: SECURITY_HARNESS_WORKDIR
+    description: Directory where job metadata, reports, and logs are stored.
