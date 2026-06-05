@@ -18,6 +18,7 @@ This repository is an MVP scaffold inspired by Anthropic's defending-code refere
 - `security_harness.runners.HermesCliRunner` — headless Hermes CLI runner.
 - `security_harness.web_target.WebTargetConfig` — authorized web target config and URL safety gates.
 - `security_harness.artifacts` — HTTP PoC, finding, grader, and report contracts.
+- `security_harness.static_scan` — read-only source/static scan orchestration that writes `source-inventory.json`, `threat-model.md`, `prompt.txt`, `findings.json`, `report.md`, and captured Hermes runner artifacts.
 - `plugins/hermes_security_harness` — Hermes plugin skeleton exposing validation/status/report tools.
 
 ## Quick smoke
@@ -27,6 +28,10 @@ uv venv
 uv pip install -e '.[dev]'
 pytest -q
 security-harness validate-target examples/web-target.local.yaml
+security-harness static-scan examples/web-target.local.yaml \
+  --source-root . \
+  --artifacts runs/static-smoke \
+  --toolsets file
 ```
 
 ## Not yet included
