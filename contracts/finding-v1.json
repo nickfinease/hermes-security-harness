@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "finding/v1",
+  "description": "A security finding discovered by any detector or scan phase.",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable short identifier for the finding."
+    },
+    "runId": {
+      "type": "string",
+      "description": "The scan or replay run that produced this finding."
+    },
+    "targetId": {
+      "type": "string",
+      "description": "The web target under evaluation."
+    },
+    "detectorId": {
+      "type": "string",
+      "description": "The detector or scan phase that discovered this finding."
+    },
+    "title": {
+      "type": "string",
+      "description": "Concise human-readable title."
+    },
+    "description": {
+      "type": "string",
+      "description": "Detailed explanation of the finding."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["critical", "high", "medium", "low", "informational"],
+      "description": "Severity rating."
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["high", "medium", "low"],
+      "description": "Confidence in the finding."
+    },
+    "affected": {
+      "type": "object",
+      "properties": {
+        "file": { "type": "string" },
+        "url": { "type": "string" },
+        "step": { "type": "string" }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "description": "Supporting evidence (files, URLs, snippets, responses)."
+    },
+    "remediation": {
+      "type": "object",
+      "properties": {
+        "summary": { "type": "string" }
+      }
+    }
+  },
+  "required": ["id", "runId", "targetId", "detectorId", "title", "severity", "affected", "evidence"],
+  "type": "object"
+}

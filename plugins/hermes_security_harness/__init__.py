@@ -11,6 +11,13 @@ def register(ctx):
         description="Validate an authorized web-target/v1 config before running the harness.",
     )
     ctx.register_tool(
+        name="security_start_scan",
+        toolset="security_harness",
+        schema=schemas.SECURITY_START_SCAN,
+        handler=tools.start_scan,
+        description="Start a security harness scan job and return a job ID for polling.",
+    )
+    ctx.register_tool(
         name="security_status",
         toolset="security_harness",
         schema=schemas.SECURITY_STATUS,

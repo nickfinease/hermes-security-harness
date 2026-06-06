@@ -46,3 +46,41 @@ def test_plugin_rejects_invalid_job_id_with_json_error(monkeypatch, tmp_path):
     result = json.loads(tools.status({"job_id": "../oops"}))
     assert result["success"] is False
     assert "invalid job_id" in result["error"]
+
+
+def test_plugin_start_scan_invokes_job_start_with_fixed_argv(tmp_path, monkeypatch):
+    tools = plugin_module("tools")
+    fake_cli = tmp_path / "security-harness"
+    fake_cli.write_text("""#!/usr/bin/env python3
+import json, sys
+assert sys.argv[1] == 'job-start'
+assert '--workdir' in sys.argv
+assert '--scan-type' in sys.argv
+assert sys.argv[sys.argv.index('--scan-type') + 1] == 'http-smoke'
+assert '--config' in sys.argv
+print(json.dumps({'success': True, 'job_id': 'job_fake', 'status': 'queued'}))
+""")
+    fake_cli.chmod(0o755)
+    config = tmp_path / "target.yaml"
+    config.write_text("schemaVersion: web-target/v1\n")
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    monkeypatch.setenv("SECURITY_HARNESS_CLI", str(fake_cli))
+    monkeypatch.setenv("SECURITY_HARNESS_WORKDIR", str(workdir))
+
+    result = json.loads(tools.start_scan({"scan_type": "http-smoke", "config_path": str(config)}))
+
+    assert result == {"success": True, "job_id": "job_fake", "status": "queued"}
+
+
+def test_plugin_registers_start_scan_tool():
+    plugin = plugin_module("__init__")
+    registered = []
+
+    class Ctx:
+        def register_tool(self, **kwargs):
+            registered.append(kwargs["name"])
+
+    plugin.register(Ctx())
+
+    assert "security_start_scan" in registered

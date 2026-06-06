@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "dependency-audit/v1",
+  "description": "Schema for dependency vulnerability audit results.",
+  "properties": {
+    "schemaVersion": { "type": "string" },
+    "runId": { "type": "string" },
+    "generatedAt": { "type": "string" },
+    "sourceRoot": { "type": "string" },
+    "totalDependencies": { "type": "integer" },
+    "vulnerableCount": { "type": "integer" },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "finding/v1#/definitions/finding" }
+    },
+    "warnings": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": ["schemaVersion", "runId", "findings"],
+  "type": "object"
+}

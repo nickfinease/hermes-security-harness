@@ -1,7 +1,8 @@
 """Safe thin wrapper tools for Hermes plugin use.
 
-The MVP exposes validation/status/report only. Long-running dynamic scan tools
-should be added after the job runner and sandbox gates are implemented.
+The plugin exposes validate/start/status/report wrappers. Scan starts return a
+job ID; long-running work happens in the CLI job worker and reports are fetched
+from the bounded workdir.
 """
 from __future__ import annotations
 
@@ -25,6 +26,46 @@ def validate_target(params, **kwargs):
         )
         if result.returncode != 0:
             return _json_error(result.stderr or result.stdout or "validate-target failed")
+        return result.stdout
+    except Exception as exc:
+        return _json_error(str(exc))
+
+
+def start_scan(params, **kwargs):
+    del kwargs
+    try:
+        cli = _cli_path()
+        workdir = _workdir()
+        scan_type = _safe_scan_type(params.get("scan_type", "http-smoke"))
+        config_path = _config_path(params.get("config_path", ""))
+        argv = [str(cli), "job-start", "--workdir", str(workdir), "--scan-type", scan_type, "--config", str(config_path)]
+        if params.get("source_root"):
+            argv += ["--source-root", str(_source_root(params.get("source_root")))]
+        if params.get("poc_path"):
+            argv += ["--poc", str(_config_path(params.get("poc_path")))]
+        if params.get("skip_agent"):
+            argv.append("--skip-agent")
+        if params.get("run_lifecycle"):
+            argv.append("--run-lifecycle")
+        for key, flag in [
+            ("request_timeout", "--request-timeout"),
+            ("max_turns", "--max-turns"),
+            ("timeout", "--timeout"),
+            ("max_files", "--max-files"),
+        ]:
+            if params.get(key) is not None:
+                argv += [flag, str(params[key])]
+        if params.get("sandbox_mode"):
+            argv += ["--sandbox-mode", str(params["sandbox_mode"])]
+        for host in params.get("egress_hosts") or []:
+            argv += ["--egress-host", str(host)]
+        if params.get("ephemeral_home"):
+            argv += ["--ephemeral-home", str(_source_root(params.get("ephemeral_home")))]
+        if params.get("no_credential_mounts"):
+            argv.append("--no-credential-mounts")
+        result = subprocess.run(argv, text=True, capture_output=True, timeout=30, check=False)
+        if result.returncode not in {0, 1}:
+            return _json_error(result.stderr or result.stdout or "job-start failed")
         return result.stdout
     except Exception as exc:
         return _json_error(str(exc))
@@ -103,6 +144,26 @@ def _config_path(value: str) -> Path:
         if not any(_under(path, root) for root in allowed):
             raise RuntimeError("config_path is outside SECURITY_HARNESS_ALLOWED_CONFIG_ROOTS")
     return path
+
+
+def _source_root(value: str) -> Path:
+    if not value:
+        raise RuntimeError("path is required")
+    path = Path(value).expanduser().resolve()
+    if not path.exists():
+        raise RuntimeError("path does not exist")
+    roots = [r for r in os.environ.get("SECURITY_HARNESS_ALLOWED_SOURCE_ROOTS", "").split(os.pathsep) if r]
+    if roots:
+        allowed = [Path(r).expanduser().resolve() for r in roots]
+        if not any(_under(path, root) for root in allowed):
+            raise RuntimeError("path is outside SECURITY_HARNESS_ALLOWED_SOURCE_ROOTS")
+    return path
+
+
+def _safe_scan_type(value: str) -> str:
+    if value not in {"http-smoke", "static-scan", "poc-replay"}:
+        raise RuntimeError("invalid scan_type")
+    return value
 
 
 def _safe_job_id(value: str) -> str:

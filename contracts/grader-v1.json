@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "grader/v1",
+  "description": "Grading result for a scan or replay run, including gates and status.",
+  "properties": {
+    "runId": {
+      "type": "string",
+      "description": "The run this grader applies to."
+    },
+    "targetId": {
+      "type": "string",
+      "description": "The target under evaluation."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["verified", "unverified", "failed", "error"],
+      "description": "Overall grading status."
+    },
+    "findings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of finding IDs."
+    },
+    "gates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "passed": { "type": "boolean" }
+        }
+      },
+      "description": "Safety gate results."
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Paths to output artifacts."
+    }
+  },
+  "required": ["runId", "targetId", "status", "findings"],
+  "type": "object"
+}

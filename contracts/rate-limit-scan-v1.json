@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "rate-limit-scan/v1",
+  "description": "Schema for rate-limit detection scan results.",
+  "properties": {
+    "schemaVersion": { "type": "string" },
+    "runId": { "type": "string" },
+    "targetId": { "type": "string" },
+    "generatedAt": { "type": "string" },
+    "summary": {
+      "type": "object",
+      "properties": {
+        "endpointsTested": { "type": "integer" },
+        "totalRequests": { "type": "integer" },
+        "burstSize": { "type": "integer" },
+        "delayMs": { "type": "integer" }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "finding/v1#/definitions/finding" }
+    },
+    "warnings": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": ["schemaVersion", "runId", "targetId", "findings"],
+  "type": "object"
+}

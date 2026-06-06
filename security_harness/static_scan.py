@@ -440,6 +440,7 @@ def build_findings_document(
         parsed_findings, parsed = _parse_agent_findings(agent_result.stdout)
         findings = [_normalize_finding(item, target, run_id, idx) for idx, item in enumerate(parsed_findings, start=1)]
 
+    patch_candidates = build_patch_candidates(target, run_id, findings)
     return {
         "schemaVersion": "static-findings/v1",
         "runId": run_id,
@@ -447,12 +448,47 @@ def build_findings_document(
         "sourceRoot": str(source_root),
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "workspaceWritesEnabled": False,
-        "patchCandidates": [],
+        "patchCandidates": patch_candidates,
         "agent": _agent_summary(agent_result),
         "parser": parsed,
         "warnings": warnings,
         "findings": findings,
     }
+
+
+def build_patch_candidates(target: WebTargetConfig, run_id: str, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Create inert patch-candidate metadata from source findings.
+
+    These are intentionally not unified diffs and contain no executable patch
+    commands. They give a later workspace-enabled phase enough structure to
+    decide what to edit while keeping source-only mode non-mutating.
+    """
+    candidates: list[dict[str, Any]] = []
+    for idx, finding in enumerate(findings, start=1):
+        affected = finding.get("affected") if isinstance(finding.get("affected"), dict) else {}
+        files = []
+        if affected.get("file"):
+            files.append(str(affected["file"]))
+        evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+        for item in evidence.get("files", []) if isinstance(evidence.get("files"), list) else []:
+            if isinstance(item, str) and item not in files:
+                files.append(item)
+        candidates.append(
+            {
+                "schemaVersion": "patch-candidate/v1",
+                "id": f"patch-candidate-{idx}",
+                "runId": run_id,
+                "targetId": target.id,
+                "findingId": finding.get("id"),
+                "title": f"Inert remediation candidate for {finding.get('title') or finding.get('id')}",
+                "affectedFiles": files,
+                "workspaceWritesEnabled": False,
+                "requiresHumanReview": True,
+                "patch": None,
+                "guidance": finding.get("remediation", {}),
+            }
+        )
+    return candidates
 
 
 def build_report(

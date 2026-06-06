@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "http-poc/v1",
+  "id": "toy-unsafe-redirect",
+  "findingId": "toy-redirect",
+  "targetId": "toy-vulnerable-local",
+  "title": "Unsafe redirect should leave the target allowlist",
+  "preconditions": [
+    "Start examples/toy-vulnerable-app/server.py on 127.0.0.1:8765"
+  ],
+  "steps": [
+    {
+      "name": "external redirect",
+      "request": {
+        "method": "GET",
+        "url": "http://127.0.0.1:8765/redirect?next=https://evil.example/"
+      },
+      "expect": {
+        "status": 302
+      }
+    }
+  ],
+  "replaySafety": {
+    "methods": ["GET"],
+    "mutatesState": false,
+    "requiresSandbox": false
+  }
+}

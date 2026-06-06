@@ -59,3 +59,17 @@ def test_rejects_zero_request_budget():
     cfg = minimal_config(scope={"maxRequests": 0, "maxRuntimeSeconds": 30})
     with pytest.raises(TargetValidationError, match="maxRequests"):
         WebTargetConfig.from_dict(cfg)
+
+
+def test_rejects_public_staging_host_without_operator_allowlist(monkeypatch):
+    monkeypatch.delenv("SECURITY_HARNESS_APPROVED_STAGING_HOSTS", raising=False)
+    cfg = minimal_config(environment="staging", baseUrl="https://example.com", allowedHosts=["example.com"])
+    with pytest.raises(TargetValidationError, match="operator allowlist"):
+        WebTargetConfig.from_dict(cfg)
+
+
+def test_accepts_public_staging_host_with_operator_allowlist(monkeypatch):
+    monkeypatch.setenv("SECURITY_HARNESS_APPROVED_STAGING_HOSTS", "example.com")
+    cfg = minimal_config(environment="staging", baseUrl="https://example.com", allowedHosts=["example.com"])
+    target = WebTargetConfig.from_dict(cfg)
+    assert target.base_url == "https://example.com"

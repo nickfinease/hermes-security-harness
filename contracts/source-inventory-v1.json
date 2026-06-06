@@ -1,0 +1,83 @@
+{
+  "schemaVersion": "source-inventory/v1",
+  "description": "Inventory of source files for static analysis, with signal and category summaries.",
+  "properties": {
+    "targetId": {
+      "type": "string",
+      "description": "The target under evaluation."
+    },
+    "schemaVersion": {
+      "type": "string",
+      "description": "Schema version string."
+    },
+    "target": {
+      "type": "object",
+      "description": "Target configuration summary."
+    },
+    "sourceRoot": {
+      "type": "string",
+      "description": "Root directory of the source code."
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp."
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "maxFiles": { "type": "integer" }
+      }
+    },
+    "totals": {
+      "type": "object",
+      "properties": {
+        "candidateFiles": { "type": "integer" },
+        "eligibleFiles": { "type": "integer" },
+        "includedFiles": { "type": "integer" },
+        "includedBytes": { "type": "integer" },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "properties": {
+        "byCategory": { "type": "object" },
+        "bySignal": { "type": "object" }
+      }
+    },
+    "skipped": {
+      "type": "object",
+      "properties": {
+        "directories": { "type": "integer" },
+        "binary_or_unsupported": { "type": "integer" },
+        "symlinks": { "type": "integer" },
+        "over_budget": { "type": "integer" },
+        "unreadable": { "type": "integer" }
+      }
+    },
+    "selection": {
+      "type": "object",
+      "properties": {
+        "strategy": { "type": "string" },
+        "priority": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "sizeBytes": { "type": "integer" },
+          "sha256": { "type": "string" },
+          "language": { "type": "string" },
+          "category": { "type": "string" },
+          "signals": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  },
+  "required": ["targetId", "schemaVersion", "sourceRoot", "files", "totals"],
+  "type": "object"
+}

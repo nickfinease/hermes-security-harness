@@ -1,0 +1,57 @@
+{
+  "schemaVersion": "http-poc/v1",
+  "description": "A structured HTTP proof-of-concept with request steps for PoC replay.",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique PoC identifier."
+    },
+    "schemaVersion": {
+      "type": "string",
+      "description": "Schema version string."
+    },
+    "targetId": {
+      "type": "string",
+      "description": "The target this PoC is scoped to."
+    },
+    "title": {
+      "type": "string",
+      "description": "Human-readable title."
+    },
+    "findingId": {
+      "type": "string",
+      "description": "Optional: the finding this PoC is designed to verify."
+    },
+    "steps": {
+      "type": "array",
+      "description": "Ordered list of HTTP request steps.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "request": {
+            "type": "object",
+            "properties": {
+              "method": { "type": "string" },
+              "url": { "type": "string" },
+              "headers": { "type": "object" },
+              "body": { "type": ["string", "null"] }
+            },
+            "required": ["url"]
+          },
+          "expect": {
+            "type": "object",
+            "properties": {
+              "status": { "type": "integer" },
+              "bodyContains": { "type": "string" }
+            }
+          }
+        },
+        "required": ["request"]
+      }
+    }
+  },
+  "required": ["id", "schemaVersion", "targetId", "steps"],
+  "type": "object"
+}

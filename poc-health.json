@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "http-poc/v1",
+  "id": "finese-health-verify",
+  "targetId": "finese-local",
+  "description": "Verify health endpoint returns 200 with security headers",
+  "steps": [
+    {
+      "name": "healthz-check",
+      "request": {
+        "method": "GET",
+        "url": "http://localhost:3000/api/health"
+      },
+      "expect": {
+        "status": 200
+      }
+    }
+  ]
+}

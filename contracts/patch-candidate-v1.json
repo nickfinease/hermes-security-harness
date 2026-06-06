@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "patch-candidate/v1",
+  "description": "An inert or validated patch candidate derived from a source scan finding.",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique patch candidate identifier."
+    },
+    "runId": {
+      "type": "string",
+      "description": "The scan run that produced this candidate."
+    },
+    "targetId": {
+      "type": "string",
+      "description": "The target under evaluation."
+    },
+    "findingId": {
+      "type": "string",
+      "description": "The finding this patch targets."
+    },
+    "title": {
+      "type": "string",
+      "description": "Human-readable title."
+    },
+    "affectedFiles": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of file paths affected by this patch."
+    },
+    "workspaceWritesEnabled": {
+      "type": "boolean",
+      "description": "Whether the workspace allows patch application."
+    },
+    "requiresHumanReview": {
+      "type": "boolean",
+      "description": "Whether a human must approve before application."
+    },
+    "patch": {
+      "type": ["string", "null"],
+      "description": "Unified diff patch text (null for inert candidates)."
+    },
+    "guidance": {
+      "type": "object",
+      "properties": {
+        "summary": { "type": "string" }
+      }
+    }
+  },
+  "required": ["id", "runId", "targetId", "affectedFiles", "patch"],
+  "type": "object"
+}

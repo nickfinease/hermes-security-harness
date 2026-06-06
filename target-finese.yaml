@@ -1,0 +1,29 @@
+schemaVersion: web-target/v1
+id: finese-local
+name: FinEase Local
+environment: local
+baseUrl: http://localhost:3000
+allowedHosts:
+  - localhost
+  - 127.0.0.1
+scope:
+  includePaths:
+    - /
+    - /login
+    - /api/health
+    - /api/auth/session
+    - /api/auth/csrf
+    - /api/auth/signin
+    - /api/auth/signout
+    - /dashboard
+    - /about
+  maxRequests: 15
+  maxRuntimeSeconds: 60
+detectors:
+  enabled:
+    - reachability-smoke
+    - security-headers-smoke
+safety:
+  requireLocalOrStaging: true
+  requireAllowedHostMatch: true
+  blockCloudMetadataIps: true

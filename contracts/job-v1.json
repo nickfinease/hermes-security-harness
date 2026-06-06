@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "job/v1",
+  "description": "A job in the security harness job registry, tracking status and artifacts.",
+  "properties": {
+    "job_id": {
+      "type": "string",
+      "description": "Unique job identifier."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["queued", "running", "succeeded", "failed", "cancelled"],
+      "description": "Job execution status."
+    },
+    "success": {
+      "type": "boolean",
+      "description": "Whether the job completed successfully."
+    },
+    "spec": {
+      "type": "object",
+      "description": "Job specification (scan type, config, params)."
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 creation timestamp."
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 last-updated timestamp."
+    },
+    "pid": {
+      "type": ["integer", "null"],
+      "description": "Worker process ID."
+    },
+    "result": {
+      "type": ["object", "null"],
+      "description": "Job result data."
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Paths to job artifacts."
+    },
+    "error": {
+      "type": ["string", "null"],
+      "description": "Error message if the job failed."
+    },
+    "worker": {
+      "type": ["object", "null"],
+      "properties": {
+        "argv": { "type": "array", "items": { "type": "string" } },
+        "stdoutPath": { "type": "string" },
+        "stderrPath": { "type": "string" }
+      }
+    }
+  },
+  "required": ["job_id", "status", "spec", "success"],
+  "type": "object"
+}

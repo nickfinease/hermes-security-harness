@@ -1,0 +1,79 @@
+{
+  "schemaVersion": "poc-replay/v1",
+  "description": "Output of a PoC replay run, including steps, findings, and safety gate results.",
+  "properties": {
+    "runId": {
+      "type": "string",
+      "description": "Unique run identifier."
+    },
+    "targetId": {
+      "type": "string",
+      "description": "The target under evaluation."
+    },
+    "pocId": {
+      "type": "string",
+      "description": "The PoC that was replayed."
+    },
+    "findingId": {
+      "type": "string",
+      "description": "The finding this PoC targets."
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp."
+    },
+    "verified": {
+      "type": "boolean",
+      "description": "Whether the PoC was fully verified."
+    },
+    "dynamic": {
+      "type": "boolean",
+      "description": "Whether this replay involved mutation-capable requests."
+    },
+    "sandbox": {
+      "type": "object",
+      "properties": {
+        "mode": { "type": "string" },
+        "egressHosts": { "type": "array", "items": { "type": "string" } },
+        "ephemeralHome": { "type": ["string", "null"] },
+        "credentialsMounted": { "type": "boolean" }
+      }
+    },
+    "lifecycle": {
+      "type": "object",
+      "properties": {
+        "reset": { "type": "object" },
+        "seed": { "type": "object" }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "index": { "type": "integer" },
+          "name": { "type": "string" },
+          "method": { "type": "string" },
+          "url": { "type": "string" },
+          "status": { "type": ["integer", "null"] },
+          "expectedStatus": { "type": ["integer", "null"] },
+          "ok": { "type": "boolean" },
+          "durationMs": { "type": "number" },
+          "redirect": { "type": ["object", "null"] },
+          "error": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "finding-v1.json" }
+    }
+  },
+  "required": ["runId", "targetId", "verified", "dynamic", "steps", "findings"],
+  "type": "object"
+}

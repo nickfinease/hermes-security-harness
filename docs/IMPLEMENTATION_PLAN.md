@@ -18,19 +18,20 @@ Build a Hermes-native defensive security harness for authorized web targets, rep
 ## Phase 1 — static scan workflow
 
 - Add prompt templates for threat model, source scan, triage, patch candidates.
-- Generate inert patch diffs only.
+- Generate inert patch candidates in source-only mode.
 - Keep scans read-only unless explicitly running patch generation in a workspace.
 
 ## Phase 2 — job runner
 
 - Add SQLite or JSONL job registry.
-- Add background static scan tool.
-- Add status/report polling through plugin.
+- Add background static scan and HTTP smoke tools.
+- Add start/status/report polling through plugin.
 
 ## Phase 3 — web dynamic harness
 
 - Add local/staging app lifecycle runner.
-- Add HTTP PoC replay.
+- Add deterministic GET-only HTTP smoke checks for explicit scoped paths.
+- Add HTTP PoC replay with grader artifacts.
 - Add detector contracts and initial non-destructive detectors.
 - Add grader agents that reset/seed then replay PoCs.
 

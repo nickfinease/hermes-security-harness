@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlparse
 import ipaddress
 import json
+import os
 import re
 
 try:
@@ -93,6 +94,10 @@ class WebTargetConfig:
             raise TargetValidationError("baseUrl must be an http(s) URL with a host")
         if _is_metadata_host(parsed.hostname):
             raise TargetValidationError("baseUrl points at a blocked metadata/link-local IP")
+        if not _is_local_private_or_approved_staging_host(parsed.hostname):
+            raise TargetValidationError(
+                "public staging hosts require operator allowlist via SECURITY_HARNESS_APPROVED_STAGING_HOSTS"
+            )
         normalized_allowed = [_normalize_allowed_host(h) for h in allowed_hosts_raw]
         if _normalize_host(parsed.hostname) not in normalized_allowed:
             raise TargetValidationError("baseUrl host must be listed in allowedHosts")
@@ -221,3 +226,19 @@ def _is_metadata_host(host: str) -> bool:
     except ValueError:
         return False
     return ip in _LINK_LOCAL_V4 or ip in _LINK_LOCAL_V6
+
+
+def _is_local_private_or_approved_staging_host(host: str) -> bool:
+    normalized = _normalize_host(host.strip("[]"))
+    if normalized == "localhost" or normalized.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(normalized)
+    except ValueError:
+        approved = {
+            _normalize_host(item)
+            for item in re.split(r"[,;:\s]+", os.environ.get("SECURITY_HARNESS_APPROVED_STAGING_HOSTS", ""))
+            if item.strip()
+        }
+        return normalized in approved
+    return ip.is_loopback or ip.is_private

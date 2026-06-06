@@ -1,0 +1,24 @@
+schemaVersion: web-target/v1
+id: toy-vulnerable-local
+name: Toy Vulnerable Local App
+environment: local
+baseUrl: http://127.0.0.1:8765
+allowedHosts:
+  - 127.0.0.1
+scope:
+  includePaths:
+    - /
+    - /api/health
+    - /redirect?next=https://evil.example/
+  excludePaths: []
+  maxRequests: 10
+  maxRuntimeSeconds: 30
+detectors:
+  enabled:
+    - reachability-smoke
+    - security-headers-smoke
+    - unsafe-redirect
+safety:
+  requireLocalOrStaging: true
+  requireAllowedHostMatch: true
+  blockCloudMetadataIps: true

@@ -102,6 +102,10 @@ def test_static_scan_cli_creates_source_only_artifacts_and_parses_agent_findings
     findings = json.loads((run_dir / "findings.json").read_text())
     assert findings["schemaVersion"] == "static-findings/v1"
     assert findings["findings"][0]["id"] == "agent-finding-1"
+    assert findings["patchCandidates"][0]["schemaVersion"] == "patch-candidate/v1"
+    assert findings["patchCandidates"][0]["findingId"] == "agent-finding-1"
+    assert findings["patchCandidates"][0]["workspaceWritesEnabled"] is False
+    assert findings["patchCandidates"][0]["patch"] is None
     assert findings["agent"]["ok"] is True
     assert Path(findings["agent"]["stdoutPath"]).exists()
 

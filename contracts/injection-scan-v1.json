@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "injection-scan/v1",
+  "description": "Schema for injection scanner results (XSS, SQLi, SSRF).",
+  "properties": {
+    "schemaVersion": { "type": "string" },
+    "runId": { "type": "string" },
+    "targetId": { "type": "string" },
+    "generatedAt": { "type": "string" },
+    "summary": {
+      "type": "object",
+      "properties": {
+        "totalTests": { "type": "integer" },
+        "xssTests": { "type": "integer" },
+        "sqliTests": { "type": "integer" },
+        "ssrfTests": { "type": "integer" },
+        "xssFindings": { "type": "integer" },
+        "sqliFindings": { "type": "integer" },
+        "ssrfFindings": { "type": "integer" }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "finding/v1#/definitions/finding" }
+    },
+    "warnings": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": ["schemaVersion", "runId", "targetId", "findings"],
+  "type": "object"
+}

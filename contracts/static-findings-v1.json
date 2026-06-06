@@ -1,0 +1,56 @@
+{
+  "schemaVersion": "static-findings/v1",
+  "description": "Structured findings document from a static source scan, including patch candidates.",
+  "properties": {
+    "runId": {
+      "type": "string",
+      "description": "The scan run that produced these findings."
+    },
+    "targetId": {
+      "type": "string",
+      "description": "The target under evaluation."
+    },
+    "sourceRoot": {
+      "type": "string",
+      "description": "Root directory of the source code."
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp."
+    },
+    "workspaceWritesEnabled": {
+      "type": "boolean",
+      "description": "Whether patch application to the workspace is permitted."
+    },
+    "patchCandidates": {
+      "type": "array",
+      "items": { "$ref": "patch-candidate-v1.json" }
+    },
+    "agent": {
+      "type": "object",
+      "properties": {
+        "ok": { "type": "boolean" },
+        "exitCode": { "type": "integer" },
+        "timedOut": { "type": "boolean" }
+      }
+    },
+    "parser": {
+      "type": "object",
+      "properties": {
+        "ok": { "type": "boolean" },
+        "error": { "type": "string" }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "findings": {
+      "type": "array",
+      "items": { "$ref": "finding-v1.json" }
+    }
+  },
+  "required": ["runId", "targetId", "workspaceWritesEnabled", "findings"],
+  "type": "object"
+}
