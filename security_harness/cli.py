@@ -16,6 +16,9 @@ from .rate_limit import RateLimitConfig, run_rate_limit_scan
 from .runners import AgentRunRequest, HermesCliRunner
 from .sandbox import SandboxPolicy, SandboxValidationError
 from .static_scan import DEFAULT_STATIC_TEMPLATE, run_static_scan
+from .recon import run_recon
+from .chains import run_chain_analysis, chain_to_finding, write_chain_report, ChainConfig
+from .report import ReportConfig, generate_report, generate_json_report, write_report, risk_matrix
 from .web_target import TargetValidationError, load_target_config
 
 
@@ -72,6 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
     injection.add_argument("config", help="Path to web-target/v1 YAML or JSON config")
     injection.add_argument("--artifacts", default="runs")
     injection.add_argument("--request-timeout", type=float, default=5)
+    injection.add_argument("--username")
+    injection.add_argument("--password")
+    injection.add_argument("--login-url")
+    injection.add_argument("--cookie-name", default="sessionid")
+    injection.add_argument("--protected-paths", default="/dashboard,/api/profile")
 
     auth = sub.add_parser("auth-scan", help="Test authentication flows and session handling")
     auth.add_argument("config", help="Path to web-target/v1 YAML or JSON config")
@@ -128,6 +136,35 @@ def build_parser() -> argparse.ArgumentParser:
     job_worker = sub.add_parser("job-worker", help=argparse.SUPPRESS)
     job_worker.add_argument("--workdir", required=True)
     job_worker.add_argument("job_id")
+
+    recon = sub.add_parser("recon", help="Run target reconnaissance (crawl, form extraction, API discovery)")
+    recon.add_argument("config", help="Path to web-target/v1 YAML or JSON config")
+    recon.add_argument("--artifacts", default="runs")
+    recon.add_argument("--request-timeout", type=float, default=5.0)
+    recon.add_argument("--openapi-url", help="Direct URL to OpenAPI specification")
+    recon.add_argument("--bundle-url", help="URL to fetch JS bundle for analysis")
+    recon.add_argument("--known-auth", default="", help="Comma-separated known auth paths")
+    recon.add_argument("--max-depth", type=int, default=2, help="Max crawl depth")
+    recon.add_argument("--max-pages", type=int, default=50, help="Max pages to crawl")
+    recon.add_argument("--custom-hidden-paths", default="", help="Comma-separated custom paths to probe")
+
+    report = sub.add_parser("report", help="Generate structured security report from findings")
+    report.add_argument("--findings", nargs="+", required=True, help="Paths to scan result JSON files")
+    report.add_argument("--config", required=True, help="Path to web-target/v1 YAML or JSON config")
+    report.add_argument("--output", "-o", default="report.md", help="Output file path (.md or .json)")
+    report.add_argument("--json", action="store_true", help="Force JSON output format")
+    report.add_argument("--no-evidence", action="store_true", help="Exclude raw evidence")
+    report.add_argument("--no-remediation", action="store_true", help="Exclude remediation recommendations")
+    report.add_argument("--no-owasp", action="store_true", help="Exclude OWASP mapping")
+    report.add_argument("--no-mitre", action="store_true", help="Exclude MITRE ATT&CK mapping")
+    report.add_argument("--no-cvss", action="store_true", help="Exclude CVSS-like scoring")
+    report.add_argument("--no-summary", action="store_true", help="Exclude executive summary")
+
+    chain = sub.add_parser("chain", help="Run vulnerability chain correlation on scan findings")
+    chain.add_argument("--findings", nargs="+", required=True, help="Paths to scan result JSON files")
+    chain.add_argument("--output", "-o", default="chains.json", help="Output file path")
+    chain.add_argument("--min-priority", type=int, default=0, help="Minimum chain priority to include")
+
     return parser
 
 
@@ -291,11 +328,32 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "injection-scan":
         try:
-            result = run_injection_scan(args.config, args.artifacts, request_timeout=args.request_timeout)
+            auth_cfg = None
+            if args.username and args.password and args.login_url:
+                auth_cfg = {
+                    "login_url": args.login_url,
+                    "username": args.username,
+                    "password": args.password,
+                    "cookie_name": args.cookie_name,
+                    "protected_paths": [p.strip() for p in args.protected_paths.split(",") if p.strip()],
+                }
+            result = run_injection_scan(args.config, args.artifacts, request_timeout=args.request_timeout, auth=auth_cfg)
         except (TargetValidationError, OSError, ValueError) as exc:
             print(json.dumps({"success": False, "error": str(exc)}))
             return 2
-        print(json.dumps(result.to_summary(), indent=2))
+
+        summary = result.to_summary()
+        # Add auth info to summary for backward compatibility
+        scan_path = Path(result.artifacts.get("injection_scan", ""))
+        if scan_path.exists():
+            import json as _json
+            doc = _json.loads(scan_path.read_text())
+            auth_info = doc.get("auth", {})
+            summary["auth"] = auth_info
+            if auth_info.get("authenticated"):
+                summary["loginStep"] = "auth-login"
+
+        print(json.dumps(summary, indent=2))
         return 0 if result.success else 1
 
     if args.command == "auth-scan":
@@ -343,6 +401,130 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(json.dumps(result.to_summary(), indent=2))
         return 0 if result.success else 1
+
+    if args.command == "recon":
+        try:
+            known_auth = [p.strip() for p in args.known_auth.split(",") if p.strip()] if args.known_auth else None
+            custom_hidden = [p.strip() for p in args.custom_hidden_paths.split(",") if p.strip()] if args.custom_hidden_paths else None
+            result = run_recon(
+                args.config,
+                openapi_url=args.openapi_url,
+                bundle_url=args.bundle_url,
+                known_auth=known_auth,
+                max_depth=args.max_depth,
+                max_pages=args.max_pages,
+                request_timeout=args.request_timeout,
+                artifacts_root=args.artifacts,
+                custom_hidden_paths=custom_hidden,
+            )
+        except (TargetValidationError, OSError, ValueError) as exc:
+            print(json.dumps({"success": False, "error": str(exc)}))
+            return 2
+        print(json.dumps(result.to_summary(), indent=2))
+        print(f"\nRecon artifacts written to: {result.artifacts.get('recon_summary', 'N/A')}")
+        return 0 if result.surfaces else 1
+
+    if args.command == "report":
+        try:
+            import json as _json
+            all_findings: list[dict] = []
+            all_warnings: list[str] = []
+
+            for fp in args.findings:
+                path = Path(fp)
+                if not path.exists():
+                    continue
+                data = _json.loads(path.read_text())
+                # Extract findings from various scan formats
+                if "findings" in data:
+                    all_findings.extend(data["findings"])
+                if "warnings" in data:
+                    all_warnings.extend(data["warnings"])
+                # Also check nested formats
+                if "scanResults" in data:
+                    for r in data["scanResults"]:
+                        if isinstance(r, dict):
+                            all_findings.extend(r.get("findings", []))
+                            all_warnings.extend(r.get("warnings", []))
+
+            target = load_target_config(args.config)
+
+            from hashlib import sha256
+            from datetime import datetime, timezone
+            run_id = f"report-{sha256(datetime.now(timezone.utc).isoformat().encode()).hexdigest()[:12]}"
+
+            report_cfg = ReportConfig(
+                target_name=target.name,
+                target_url=target.base_url,
+                run_id=run_id,
+                include_evidence=not args.no_evidence,
+                include_remediation=not args.no_remediation,
+                include_owasp=not args.no_owasp,
+                include_mitre=not args.no_mitre,
+                include_cvss=not args.no_cvss,
+                include_summary=not args.no_summary,
+            )
+
+            force_json = args.json or args.output.endswith(".json")
+
+            if force_json:
+                report_data = generate_json_report(all_findings, report_cfg)
+                _out = Path(args.output).expanduser().resolve()
+                _out.parent.mkdir(parents=True, exist_ok=True)
+                _out.write_text(_json.dumps(report_data, indent=2) + "\n")
+            else:
+                report_text = generate_report(all_findings, report_cfg, warnings=all_warnings)
+                _out = Path(args.output).expanduser().resolve()
+                _out.parent.mkdir(parents=True, exist_ok=True)
+                _out.write_text(report_text)
+
+            print(f"\nReport written to: {_out}")
+            matrix = risk_matrix(all_findings)
+            print(json.dumps({"total_findings": len(all_findings), "matrix": matrix}, indent=2))
+            return 0
+        except (TargetValidationError, OSError, ValueError, json.JSONDecodeError) as exc:
+            print(json.dumps({"success": False, "error": str(exc)}))
+            return 2
+
+    if args.command == "chain":
+        try:
+            import json as _json
+
+            # Collect all findings from all input files
+            all_findings: list[dict] = []
+            for fp in args.findings:
+                path = Path(fp)
+                if not path.exists():
+                    continue
+                data = _json.loads(path.read_text())
+                if "findings" in data:
+                    all_findings.extend(data["findings"])
+                if "scanResults" in data:
+                    for r in data["scanResults"]:
+                        if isinstance(r, dict):
+                            all_findings.extend(r.get("findings", []))
+
+            config = ChainConfig(
+                enabled=True,
+                min_chain_priority=args.min_priority,
+            )
+            chains = run_chain_analysis(all_findings, config)
+
+            _out = Path(args.output).expanduser().resolve()
+            _out.parent.mkdir(parents=True, exist_ok=True)
+            write_chain_report(chains, _out)
+
+            print(f"\nChain analysis complete: {len(chains)} chain(s) detected")
+            print(f"Output: {_out}")
+
+            for chain in chains:
+                print(f"  [{chain.new_severity.upper()}] {chain.name}")
+                print(f"    Triggers: {', '.join(chain.trigger_findings[:3])}")
+                print(f"    Delta: +{chain.severity_delta}")
+            return 0
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(json.dumps({"success": False, "error": str(exc)}))
+            return 2
 
     raise AssertionError(f"unknown command {args.command}")
 

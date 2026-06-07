@@ -64,9 +64,15 @@ def _make_http_request(
             cookie_parts = [f"{k}={v}" for k, v in cookies.items()]
             req.add_header("Cookie", "; ".join(cookie_parts))
         if body and method.upper() == "POST":
-            encoded = urlencode(body).encode()
-            req.add_header("Content-Type", "application/x-www-form-urlencoded")
-            req.data = encoded
+            # Check if headers specify JSON
+            content_type = (headers or {}).get("Content-Type", "").lower()
+            if "application/json" in content_type:
+                import json
+                req.data = json.dumps(body).encode()
+            else:
+                encoded = urlencode(body).encode()
+                req.add_header("Content-Type", "application/x-www-form-urlencoded")
+                req.data = encoded
 
         opener = build_opener(_NoRedirect) if not follow_redirect else build_opener()
 
@@ -90,6 +96,13 @@ def _make_http_request(
         try:
             raw_body = exc.read(4096) or b""
             body_bytes = len(raw_body)
+            # Extract cookies from HTTPError response headers too
+            for h in exc.headers:
+                if h.lower() == "set-cookie":
+                    cookie_val = exc.headers.get(h) or ""
+                    cookie_match = re.match(r"([^\s=]+)=([^;]*)", cookie_val)
+                    if cookie_match:
+                        set_cookies[cookie_match.group(1)] = cookie_match.group(2)
         except OSError:
             body_bytes = 0
     except (TimeoutError, socket.timeout) as exc:
