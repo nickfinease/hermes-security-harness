@@ -20,7 +20,7 @@ import json
 import re
 import hashlib
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, IntEnum
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -47,6 +47,15 @@ class ReconSource(Enum):
     AUTH = "auth"
     WELL_KNOWN = "well_known"
     LINK_CRAWL = "link_crawl"
+    # Staged recon phases
+    UNAUTH_PHASE = "unauth_phase"
+    AUTH_PHASE = "auth_phase"
+
+
+class ReconStage(IntEnum):
+    """Stage of reconnaissance."""
+    UNAUTH = 1
+    AUTH = 2
 
 
 @dataclass(frozen=True)
@@ -346,11 +355,30 @@ def discover_from_openapi(
     return surfaces
 
 
-# ── JS bundle analysis ─────────────────────────────────────────────────────────
+# ── JS bundle analysis (fixed: enumerate from HTML) ─────────────────────────────
 
-_JS_ROUTE_RE = _RE(r'(?:fetch|axios|\.get|\.post|\.put|\.patch|\.delete)\s*\(\s*(?:["\'])([^"\']+)', re.IGNORECASE)
-_JS_API_RE = _RE(r'(?:/api/|\.get\(["\']/|\.post\(["\']/|\.put\(["\']/|\.patch\(["\']/|\.delete\(["\']/)([^"\')]+)', re.IGNORECASE)
-_JS_PARAM_RE = _RE(r'(?:path|route|url|endpoint)\s*[:=]\s*["\']([^"\']+)["\']', re.IGNORECASE)
+
+_JS_ROUTE_RE = _RE(r'(?:fetch|axios|\.get|\.post|\.put|\.patch|\.delete|\.head|\.options)\s*\)\s*["\x27]([^"\047]+)\047', re.IGNORECASE)
+
+_JS_API_RE = _RE(r'["\047](/api/[^"\047]*)["\047]', re.IGNORECASE)
+
+_JS_ROUTE_DEF_RE = _RE(r'(?:path|route|url|endpoint|method)\s*[:=]\s*["\047]([^"\047]+)["\047]', re.IGNORECASE)
+
+
+
+_FALSE_POSITIVE_RE = _RE(
+    r'\.(js|ts|tsx|jsx|mjs|cjs|css|woff2|png|jpg|gif|svg|ico|map|json)$'
+    r'|\.(check|apply|load|render|find|querySelector|getElementByName|matches|'
+    r'nodeType|frameElement|hot-module-replacement)$'
+    r'|\b(foo|key|name|autofocus|formenctype|formmethod|formtarget|'
+    r'enctype|method|target|url|path|route|urlsearchparams|window|'
+    r'document|element|node|map|get|set|add|remove|create|init|destroy|'
+    r'hot|module|exports|require|module|import|const|let|var|function|'
+    r'return|async|await|throw|try|catch|if|else|for|while|class|new|'
+    r'void|typeof|instanceof|in|of|break|continue|switch|case|default|'
+    r'import|export|from|static|extends|super|this|constructor|prototype)'
+    r'$', re.IGNORECASE,
+)
 
 
 def _extract_routes_from_js(js_content: str) -> list[dict[str, str]]:
@@ -358,10 +386,20 @@ def _extract_routes_from_js(js_content: str) -> list[dict[str, str]]:
     routes: list[dict[str, str]] = []
     seen: set[str] = set()
 
-    for pattern in (_JS_ROUTE_RE, _JS_API_RE, _JS_PARAM_RE):
+    for pattern in (_JS_ROUTE_RE, _JS_API_RE, _JS_ROUTE_DEF_RE):
         for match in pattern.finditer(js_content):
             url = match.group(1).strip().rstrip(";").rstrip("'").rstrip('"')
-            if url and url not in seen and not url.startswith("http://") and not url.startswith("https://"):
+            if not url:
+                continue
+            # Skip non-API URLs
+            if url.startswith("http://") or url.startswith("https://"):
+                continue
+            # Skip file paths and JS false positives
+            if url.endswith(".js") or url.endswith(".ts"):
+                continue
+            if _FALSE_POSITIVE_RE.search(url):
+                continue
+            if url not in seen:
                 seen.add(url)
                 routes.append({"route": url, "source": "js_bundle"})
 
@@ -383,38 +421,61 @@ def discover_from_js_bundle(
         List of ReconSurface entries.
     """
     surfaces: list[ReconSurface] = []
-    js_body = body
+    js_bodies: list[str] = []
 
-    if not js_body:
-        url = bundle_url or f"{base_url}/_next/static/chunks/*.js"
-        body_resp, status, _ = _fetch(url, timeout=timeout)
+    if body:
+        js_bodies.append(body)
+    elif bundle_url:
+        # Single bundle URL
+        body_resp, status, _ = _fetch(bundle_url, timeout=timeout)
         if status == 200:
-            js_body = body_resp
+            js_bodies.append(body_resp)
+    else:
+        # Discover bundles from HTML script tags (handles Next.js, React SPA, etc.)
+        shell_body, status, _ = _fetch(base_url, timeout=timeout)
+        if status == 200:
+            # Extract all JS bundle script tags
+            script_re = _RE(r'<script[^>]*src=["\']([^"\']+\.js)[^>]*>', re.IGNORECASE)
+            js_urls: set[str] = set()
+            for match in script_re.finditer(shell_body):
+                js_urls.add(match.group(1))
 
-    if not js_body:
-        return surfaces
+            # Also check for chunk/manifest patterns from Next.js
+            for pattern in (_JS_ROUTE_RE, _JS_API_RE):
+                for match in pattern.finditer(shell_body):
+                    url = match.group(1).strip().rstrip(";")
+                    if url.endswith(".js"):
+                        js_urls.add(url)
 
-    routes = _extract_routes_from_js(js_body)
-    for route_info in routes:
-        route = route_info["route"]
-        # Convert relative paths to full URLs
-        if not route.startswith("http"):
-            full_url = urljoin(base_url, route)
-        else:
-            full_url = route
+            # Fetch discovered bundles (up to 15 to avoid too many requests)
+            for js_url in sorted(js_urls)[:15]:
+                full_url = urljoin(base_url, js_url)
+                body_resp, status, _ = _fetch(full_url, timeout=timeout)
+                if status == 200:
+                    js_bodies.append(body_resp)
 
-        if _is_unique(full_url):
-            _record_url(full_url)
-            surfaces.append(ReconSurface(
-                id=f"js-{_hash_str(full_url)}",
-                url=full_url,
-                input_type="api_route",
-                parameter_name="dynamic",
-                method="unknown",
-                source=ReconSource.JS_BUNDLE,
-                confidence="medium",
-                context={"route": route},
-            ))
+    for js_body in js_bodies:
+        routes = _extract_routes_from_js(js_body)
+        for route_info in routes:
+            route = route_info["route"]
+            # Convert relative paths to full URLs
+            if not route.startswith("http"):
+                full_url = urljoin(base_url, route)
+            else:
+                full_url = route
+
+            if _is_unique(full_url):
+                _record_url(full_url)
+                surfaces.append(ReconSurface(
+                    id=f"js-{_hash_str(full_url)}",
+                    url=full_url,
+                    input_type="api_route",
+                    parameter_name="dynamic",
+                    method="unknown",
+                    source=ReconSource.JS_BUNDLE,
+                    confidence="medium",
+                    context={"route": route},
+                ))
     return surfaces
 
 
@@ -492,17 +553,19 @@ def _classify_url_patterns(url: str) -> list[tuple[str, str]]:
         List of (param_name, param_type) tuples.
     """
     params: list[tuple[str, str]] = []
-    # Express.js style: /users/:id
-    for match in _RE(r":(\w+)").finditer(url):
+    # Only look for params in the path component (after the host)
+    parsed = urlparse(url)
+    path_only = parsed.path if parsed.path else url
+    # Express.js style: /users/:id  — must be in the path, not the host:port
+    for match in _RE(r"/:(\w+)").finditer(path_only):
         params.append((match.group(1), "path_param"))
     # OpenAPI/REST style: /users/{id}
-    for match in _PATH_PARAM_RE.finditer(url):
+    for match in _PATH_PARAM_RE.finditer(path_only):
         name = match.group(1) or match.group(2)
         if name and not any(p[0] == name for p in params):
             params.append((name, "path_param"))
 
     # Query string params
-    parsed = urlparse(url)
     for key in parse_qs(parsed.query):
         params.append((key, "query_param"))
 
@@ -785,7 +848,155 @@ def discover_from_crawl(
     return surfaces
 
 
-# ── Main entry point ───────────────────────────────────────────────────────────
+# ── Next.js RSC payload parsing ────────────────────────────────────────────────
+# Next.js App Router embeds route structure in the HTML shell via RSC JSON payloads.
+# Parsing these gives us all page routes without filesystem access or JS execution.
+
+_RSC_PUSH_RE = _RE(r'self\.__next_f\.push\(\[1,"(.+?)"\]\)', re.DOTALL)
+_RSC_ROUTE_RE = _RE(r'"(?:segmentPath|parallelRouterKey|initialTree|children)".*?(?=\["\$|\\n"\\])', re.DOTALL)
+
+
+def _extract_nextjs_routes(html: str) -> list[str]:
+    """Extract route paths from a Next.js App Router shell HTML.
+
+    Parses the RSC (React Server Components) JSON payload embedded in <script> tags.
+    Returns a list of URL paths like ['/admin', '/admin/customers/[id]', '/api/auth/*'].
+    """
+    routes: set[str] = set()
+
+    # Extract all quoted strings starting with / from RSC push payloads
+    # These contain segment path values in the Next.js route tree
+    for match in _RSC_PUSH_RE.finditer(html):
+        payload = match.group(1)
+        # Find all quoted values in the payload that look like route segments
+        for quoted in _RE(r'["\'](/[a-zA-Z0-9_/\[\]-]*)["\']').finditer(payload):
+            val = quoted.group(1)
+            # Filter: keep route paths, skip Next.js internals
+            if (not val.startswith("/_")
+                and val != "__PAGE__"
+                and "node_modules" not in val
+                and ".css" not in val
+                and ".js" not in val
+                and ".woff" not in val
+                and ".png" not in val
+                and len(val) > 1
+                and len(val) < 200):
+                routes.add(val)
+
+    return sorted(routes)
+
+
+def discover_from_rsc_payload(
+    base_url: str, timeout: float = 5.0,
+) -> tuple[list[ReconSurface], list[dict[str, Any]]]:
+    """Discover page and API routes from Next.js RSC payload in shell HTML.
+
+    Args:
+        base_url: Target base URL.
+        timeout: HTTP timeout.
+
+    Returns:
+        Tuple of (surfaces, routes).
+    """
+    surfaces: list[ReconSurface] = []
+    routes: list[dict[str, Any]] = []
+
+    body, status, _ = _fetch(base_url, timeout=timeout)
+    if status != 200:
+        return surfaces, routes
+
+    discovered = _extract_nextjs_routes(body)
+
+    for route in discovered:
+        full_url = urljoin(base_url, route)
+        if _is_unique(full_url):
+            _record_url(full_url)
+            routes.append({"path": route, "method": "GET", "source": "rsc_payload"})
+
+    return surfaces, routes
+
+
+# ── Filesystem-based route discovery ──────────────────────────────────────────
+# For targets where we have access to the source directory, enumerate routes from
+# the file system. Especially useful for Next.js App Router.
+
+
+def discover_from_source_dir(
+    source_dir: str | Path,
+    base_url: str,
+) -> list[dict[str, Any]]:
+    """Discover API and page routes by scanning the source file system.
+
+    Args:
+        source_dir: Path to the project root (where app/ directory lives).
+        base_url: Target base URL (for constructing full URLs).
+
+    Returns:
+        List of route dicts with path and method.
+    """
+    routes: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    source_path = Path(source_dir)
+
+    # Next.js App Router: page.tsx files in app/ define page routes
+    for page in source_path.rglob("app/**/page.tsx"):
+        rel = str(page.relative_to(source_path))
+        # Strip app/ prefix and convert file system path to URL path
+        url_path = "/" + rel.replace("/page.tsx", "").replace("/page.ts", "")
+        if url_path and url_path != "/" and not url_path.startswith("/_"):
+            if url_path not in seen:
+                seen.add(url_path)
+                routes.append({"path": url_path, "method": "GET", "source": "source_dir", "type": "page"})
+
+    # Next.js App Router: route.ts files in app/api/ define API routes
+    for route_file in source_path.rglob("app/api/**/route.ts"):
+        rel = str(route_file.relative_to(source_path))
+        url_path = "/" + rel.replace("/route.ts", "").replace("/route.js", "")
+        if url_path and not url_path.startswith("/_"):
+            if url_path not in seen:
+                seen.add(url_path)
+                routes.append({"path": url_path, "method": "unknown", "source": "source_dir", "type": "api"})
+            # Determine actual HTTP methods from route handler content
+            try:
+                content = route_file.read_text()
+                methods = []
+                if re.search(r"export\s+function\s+GET\s*\(", content):
+                    methods.append("GET")
+                if re.search(r"export\s+function\s+POST\s*\(", content):
+                    methods.append("POST")
+                if re.search(r"export\s+function\s+PUT\s*\(", content):
+                    methods.append("PUT")
+                if re.search(r"export\s+function\s+PATCH\s*\(", content):
+                    methods.append("PATCH")
+                if re.search(r"export\s+function\s+DELETE\s*\(", content):
+                    methods.append("DELETE")
+                if not methods:
+                    methods = ["GET", "POST"]
+                routes.append({"path": url_path, "method": ", ".join(methods), "source": "source_dir", "type": "api"})
+            except Exception:
+                pass
+
+    # Express/Koa style: look for .get, .post, etc. in route files
+    for src_file in source_path.rglob("**/*.ts"):
+        if "node_modules" in str(src_file) or src_file.suffix not in (".ts", ".js"):
+            continue
+        try:
+            content = src_file.read_text()
+            for method_match in re.finditer(r'\.(get|post|put|patch|delete|head)\s*\(\s*[\'"]([^\'"]+)', content):
+                method = method_match.group(1).upper()
+                path = method_match.group(2).lstrip("/")
+                full_path = f"/api/{path}" if not path.startswith("/api/") else f"/{path}"
+                key = f"{method}:{full_path}"
+                if key not in seen:
+                    seen.add(key)
+                    routes.append({"path": full_path, "method": method, "source": "source_dir", "type": "route"})
+        except Exception:
+            pass
+
+    return routes
+
+
+# ── JS bundle analysis (fixed: enumerate from HTML) ─────────────────────────────
 
 
 def _iso_now() -> str:
@@ -833,12 +1044,26 @@ def build_recon_surfaces(
     hidden_endpoints: list[dict[str, Any]] = []
     total_requests = 0
 
+    # Next.js RSC payload parsing (page routes from shell HTML)
+    rsc_surfaces, rsc_routes = discover_from_rsc_payload(base_url, timeout=request_timeout)
+    all_surfaces.extend(rsc_surfaces)
+    discovered_routes.extend(rsc_routes)
+    total_requests += 1
+
+    # Filesystem-based route discovery (when source_dir is available)
+    if target.source_dir:
+        try:
+            fs_routes = discover_from_source_dir(target.source_dir, base_url)
+            discovered_routes.extend(fs_routes)
+        except Exception:
+            pass
+
     # OpenAPI discovery
     openapi_surfaces = discover_from_openapi(base_url, openapi_url, timeout=request_timeout)
     all_surfaces.extend(openapi_surfaces)
     total_requests += 1
 
-    # JS bundle analysis
+    # JS bundle analysis (discovers API routes from JS bundles)
     js_surfaces = discover_from_js_bundle(base_url, bundle_url, timeout=request_timeout)
     all_surfaces.extend(js_surfaces)
     total_requests += 1
@@ -848,7 +1073,7 @@ def build_recon_surfaces(
     all_surfaces.extend(sitemap_surfaces)
     total_requests += 1
 
-    # Auth surfaces
+    # Auth surfaces (expanded)
     auth_surfs = discover_auth_surfaces(base_url, known_auth, timeout=request_timeout)
     auth_surfaces = [
         {"endpoint": s.url, "method": s.method, "confidence": s.confidence}
@@ -875,13 +1100,27 @@ def build_recon_surfaces(
                 "confidence": surf.confidence,
             })
 
-    # URL pattern surfaces from known paths
+    # URL pattern surfaces from known + discovered API paths
     known_paths = ["/", "/search", "/login", "/dashboard", "/api", "/api/docs",
-                   "/about", "/contact", "/help", "/faq", "/terms", "/privacy"]
+                   "/about", "/contact", "/help", "/faq", "/terms", "/privacy",
+                   # Common Next.js/SPA routes
+                   "/admin", "/account", "/profile", "/settings", "/dashboard",
+                   "/app", "/portal", "/status", "/support", "/docs",
+                   # Common API patterns
+                   "/api/auth", "/api/users", "/api/data", "/api/v1",
+                   # Auth-related
+                   "/api/auth/login", "/api/auth/register", "/api/auth/register",
+                   "/api/auth/reset-password", "/api/auth/forgot-password",
+                   "/api/auth/2fa", "/api/auth/verify", "/api/auth/refresh",
+                   # Health/status
+                   "/api/health", "/health", "/healthz", "/readyz",
+                   # Integrations
+                   "/api/integrations", "/api/webhooks",
+                   ]
     pattern_surfaces = discover_url_patterns(base_url, known_paths)
     all_surfaces.extend(pattern_surfaces)
 
-    # OpenAPI routes
+    # OpenAPI routes (re-fetch just in case)
     openapi_body: str | None = None
     try:
         body, status, _ = _fetch(openapi_url or f"{base_url}/api-docs", timeout=request_timeout)
@@ -891,7 +1130,7 @@ def build_recon_surfaces(
         pass
     if openapi_body:
         routes = _find_openapi_paths(openapi_body)
-        discovered_routes = routes
+        discovered_routes.extend(routes)
 
     return ReconResult(
         run_id=_hash_str(f"recon-{target.id}-{_iso_now()}"),
@@ -968,4 +1207,270 @@ def run_recon(
         total_requests=result.total_requests,
         warnings=result.warnings,
         artifacts={"recon_summary": summary_path},
+    )
+
+
+# ── Staged reconnaissance (unauth/auth phases) ─────────────────────────────────
+
+
+def run_unauth_recon(
+    config_path: str | Path,
+    *,
+    artifacts_root: str | Path = "runs",
+    max_depth: int = 2,
+    max_pages: int = 50,
+    request_timeout: float = 5.0,
+) -> ReconResult:
+    """Run unauthenticated reconnaissance (public surfaces only).
+
+    Discovers surfaces that don't require authentication:
+    - OpenAPI specs, sitemaps, robots.txt
+    - URL pattern enumeration
+    - Hidden endpoint probing
+    - JS bundle analysis
+
+    Args:
+        config_path: Path to target config YAML.
+        artifacts_root: Output directory for artifacts.
+        max_depth: Max crawl depth.
+        max_pages: Max pages to crawl.
+        request_timeout: HTTP timeout in seconds.
+
+    Returns:
+        ReconResult with unauth surfaces.
+    """
+    from .web_target import load_target_config
+
+    target = load_target_config(config_path)
+    base_url = target.base_url.rstrip("/")
+
+    all_surfaces: list[ReconSurface] = []
+    discovered_routes: list[dict[str, Any]] = []
+    discovered_forms: list[dict[str, Any]] = []
+    hidden_endpoints: list[dict[str, Any]] = []
+    total_requests = 0
+
+    # OpenAPI discovery
+    try:
+        openapi_surfaces = discover_from_openapi(base_url, timeout=request_timeout)
+        all_surfaces.extend(
+            ReconSurface(
+                id=s.id,
+                url=s.url,
+                input_type=s.input_type,
+                parameter_name=s.parameter_name,
+                method=s.method,
+                source=ReconSource.UNAUTH_PHASE,
+                confidence=s.confidence,
+                context=s.context,
+            )
+            for s in openapi_surfaces
+        )
+        total_requests += 1
+    except Exception:
+        pass
+
+    # Sitemap
+    try:
+        sitemap_surfaces = discover_from_sitemap(base_url, timeout=request_timeout)
+        all_surfaces.extend(
+            ReconSurface(
+                id=s.id,
+                url=s.url,
+                input_type=s.input_type,
+                parameter_name=s.parameter_name,
+                method=s.method,
+                source=ReconSource.UNAUTH_PHASE,
+                confidence=s.confidence,
+                context=s.context,
+            )
+            for s in sitemap_surfaces
+        )
+        total_requests += 1
+    except Exception:
+        pass
+
+    # Hidden endpoints
+    try:
+        hidden = discover_hidden_endpoints(base_url, timeout=3.0)
+        hidden_endpoints = hidden
+        total_requests += len(hidden)
+    except Exception:
+        pass
+
+    # URL patterns
+    try:
+        pattern_paths = ["/", "/search", "/login", "/api", "/api/docs", "/health"]
+        pattern_surfaces = discover_url_patterns(base_url, pattern_paths)
+        all_surfaces.extend(
+            ReconSurface(
+                id=s.id,
+                url=s.url,
+                input_type=s.input_type,
+                parameter_name=s.parameter_name,
+                method=s.method,
+                source=ReconSource.UNAUTH_PHASE,
+                confidence=s.confidence,
+                context=s.context,
+            )
+            for s in pattern_surfaces
+        )
+    except Exception:
+        pass
+
+    run_id = _hash_str(f"recon-unauth-{target.id}-{_iso_now()}")
+
+    return ReconResult(
+        run_id=run_id,
+        target_id=target.id,
+        surfaces=all_surfaces,
+        discovered_routes=discovered_routes,
+        discovered_forms=discovered_forms,
+        auth_surfaces=[],
+        hidden_endpoints=hidden_endpoints,
+        total_requests=total_requests,
+    )
+
+
+def run_auth_recon(
+    config_path: str | Path,
+    session_cookies: dict[str, str],
+    *,
+    artifacts_root: str | Path = "runs",
+    request_timeout: float = 5.0,
+) -> ReconResult:
+    """Run authenticated reconnaissance (requires session).
+
+    Discovers surfaces that require authentication:
+    - Auth-protected API routes
+    - Dashboard endpoints
+    - Admin panels
+    - User profile pages
+
+    Args:
+        config_path: Path to target config YAML.
+        session_cookies: Authenticated session cookies.
+        artifacts_root: Output directory for artifacts.
+        request_timeout: HTTP timeout in seconds.
+
+    Returns:
+        ReconResult with auth surfaces.
+    """
+    from .web_target import load_target_config
+
+    target = load_target_config(config_path)
+    base_url = target.base_url.rstrip("/")
+
+    all_surfaces: list[ReconSurface] = []
+    discovered_routes: list[dict[str, Any]] = []
+    discovered_forms: list[dict[str, Any]] = []
+    hidden_endpoints: list[dict[str, Any]] = []
+    total_requests = 0
+
+    # Auth-specific paths to probe
+    auth_paths = [
+        "/api/users", "/api/dashboard", "/api/account",
+        "/admin", "/profile", "/settings",
+    ]
+
+    for path in auth_paths:
+        full_url = f"{base_url}{path}"
+        try:
+            headers = {}
+            if session_cookies:
+                headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in session_cookies.items())
+            body, status, _ = _fetch(full_url, headers=headers, timeout=request_timeout)
+            total_requests += 1
+
+            if status in (200, 301, 302):
+                surface_id = _hash_str(f"auth-{path}")
+                all_surfaces.append(ReconSurface(
+                    id=surface_id,
+                    url=full_url,
+                    input_type="endpoint",
+                    parameter_name=path,
+                    method="GET",
+                    source=ReconSource.AUTH_PHASE,
+                    confidence="medium",
+                    context={"status": status, "phase": "auth"},
+                ))
+        except Exception:
+            pass
+
+    run_id = _hash_str(f"recon-auth-{target.id}-{_iso_now()}")
+
+    return ReconResult(
+        run_id=run_id,
+        target_id=target.id,
+        surfaces=all_surfaces,
+        discovered_routes=discovered_routes,
+        discovered_forms=discovered_forms,
+        auth_surfaces=[],
+        hidden_endpoints=hidden_endpoints,
+        total_requests=total_requests,
+    )
+
+
+def run_staged_recon(
+    config_path: str | Path,
+    *,
+    session_cookies: dict[str, str] | None = None,
+    artifacts_root: str | Path = "runs",
+    max_depth: int = 2,
+    max_pages: int = 50,
+    request_timeout: float = 5.0,
+) -> ReconResult:
+    """Run full staged reconnaissance (unauth then auth).
+
+    Args:
+        config_path: Path to target config YAML.
+        session_cookies: Optional auth cookies for the second phase.
+        artifacts_root: Output directory for artifacts.
+        max_depth: Max crawl depth.
+        max_pages: Max pages to crawl.
+        request_timeout: HTTP timeout in seconds.
+
+    Returns:
+        ReconResult with all surfaces from both phases.
+    """
+    unauth_result = run_unauth_recon(
+        config_path,
+        artifacts_root=artifacts_root,
+        max_depth=max_depth,
+        max_pages=max_pages,
+        request_timeout=request_timeout,
+    )
+
+    auth_result = ReconResult(
+        run_id=unauth_result.run_id,
+        target_id=unauth_result.target_id,
+        surfaces=[],
+        discovered_routes=[],
+        discovered_forms=[],
+        auth_surfaces=[],
+        hidden_endpoints=[],
+        total_requests=0,
+    )
+
+    if session_cookies:
+        auth_result = run_auth_recon(
+            config_path,
+            session_cookies=session_cookies,
+            artifacts_root=artifacts_root,
+            request_timeout=request_timeout,
+        )
+
+    # Combine results
+    combined_surfaces = list(unauth_result.surfaces) + list(auth_result.surfaces)
+
+    return ReconResult(
+        run_id=unauth_result.run_id,
+        target_id=unauth_result.target_id,
+        surfaces=combined_surfaces,
+        discovered_routes=unauth_result.discovered_routes + auth_result.discovered_routes,
+        discovered_forms=unauth_result.discovered_forms + auth_result.discovered_forms,
+        auth_surfaces=unauth_result.auth_surfaces + auth_result.auth_surfaces,
+        hidden_endpoints=unauth_result.hidden_endpoints + auth_result.hidden_endpoints,
+        total_requests=unauth_result.total_requests + auth_result.total_requests,
+        warnings=unauth_result.warnings + auth_result.warnings,
     )

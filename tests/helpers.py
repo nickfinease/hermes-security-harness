@@ -29,6 +29,7 @@ environment: local
 baseUrl: {base_url}
 allowedHosts:
   - 127.0.0.1
+  - localhost
 scope:
   includePaths:
 {rendered_paths}
