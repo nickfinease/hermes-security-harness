@@ -6,6 +6,7 @@ baseUrl: http://localhost:3000
 allowedHosts:
   - localhost
   - 127.0.0.1
+sourceDir: /home/beans/FinEase
 scope:
   includePaths:
     - /

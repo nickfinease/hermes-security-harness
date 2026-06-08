@@ -17,6 +17,7 @@ from urllib.parse import urlencode, urlparse, urlunparse
 from ._http_client import _make_http_request, make_url
 from .artifacts import redact_secrets
 from .web_target import WebTargetConfig, load_target_config
+from .auth_client import auth_signin_nextauth
 
 
 # ── Payload Definitions ───────────────────────────────────────────────────────
@@ -237,7 +238,8 @@ def _test_cookie_session(
 
     login_url = make_url(base_url, auth.login_url)
 
-    # 1. Attempt login
+    # 1. Attempt login — try NextAuth flow first, fall back to generic
+    session = CookieSession()
     resp = _make_http_request(
         login_url,
         method="POST",
@@ -247,19 +249,68 @@ def _test_cookie_session(
     result.test_count += 1
     step = {
         "name": "login",
-        "request": {"method": "POST", "url": login_url, "body": {"username": auth.username}},
+        "request": {
+            "method": "POST",
+            "url": login_url,
+            "body": {"username": auth.username},
+        },
         "status": resp["status"],
         "setCookies": resp.get("setCookies", {}),
         "error": resp.get("error"),
     }
+
+    # Try NextAuth flow if the first attempt failed or looks like a redirect
+    if (
+        not resp.get("setCookies")
+        or resp["status"] in (302, 307, 308)
+        or "authjs.session-token" not in (resp.get("setCookies") or {})
+    ):
+        # Attempt NextAuth signin via /api/auth/callback/credentials
+        auth_result = auth_signin_nextauth(base_url, auth.username, auth.password, timeout=timeout)
+        if auth_result.get("authenticated"):
+            session.cookies = {
+                "authjs.session-token": auth_result["cookies"]["authjs.session-token"],
+            }
+            step["nextauth_auth"] = True
+            step["status"] = auth_result["steps"][-1] if auth_result["steps"] else resp["status"]
+            result.steps.append(step)
+
+            # 2. Test protected path with cookie
+            for path in auth.protected_paths:
+                protected_url = make_url(base_url, path)
+                resp = _make_http_request(
+                    protected_url,
+                    cookies=session.cookies,
+                    timeout=timeout,
+                )
+                result.test_count += 1
+                step2 = {
+                    "name": f"protected-{path}",
+                    "request": {
+                        "method": "GET",
+                        "url": protected_url,
+                        "cookies": {"[redacted]": "[redacted]"},
+                    },
+                    "status": resp["status"],
+                }
+                result.steps.append(step2)
+
+                if resp.get("status") and resp["status"] < 400:
+                    session._accessible = True
+
+                cookie_finding = _find_cookie_findings(path, resp, auth.cookie_name)
+                if cookie_finding:
+                    result.findings.append(cookie_finding)
+            return result
+
     result.steps.append(step)
+
+    if resp.get("status") and 300 <= resp["status"] < 400:
+        step["redirect"] = resp.get("error", "redirect blocked by harness")
 
     session = CookieSession(
         cookies=resp.get("setCookies", {}),
     )
-
-    if resp.get("status") and 300 <= resp["status"] < 400:
-        step["redirect"] = resp.get("error", "redirect blocked by harness")
 
     # 2. Test protected path with cookie
     for path in auth.protected_paths:
@@ -273,7 +324,11 @@ def _test_cookie_session(
 
         step = {
             "name": f"protected-{path}",
-            "request": {"method": "GET", "url": protected_url, "cookies": {"[redacted]": "[redacted]"}},
+            "request": {
+                "method": "GET",
+                "url": protected_url,
+                "cookies": {"[redacted]": "[redacted]"},
+            },
             "status": resp["status"],
         }
         result.steps.append(step)

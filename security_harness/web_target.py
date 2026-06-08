@@ -59,6 +59,7 @@ class WebTargetConfig:
     environment: str
     base_url: str
     allowed_hosts: list[str]
+    source_dir: str | None = None  # Optional: path to source dir for filesystem route discovery
     scope: ScopeConfig = field(default_factory=ScopeConfig)
     reset: LifecycleCommand = field(default_factory=LifecycleCommand)
     seed: LifecycleCommand = field(default_factory=LifecycleCommand)
@@ -118,6 +119,7 @@ class WebTargetConfig:
         reset = _lifecycle_command(lifecycle.get("reset") or {}, "reset")
         seed = _lifecycle_command(lifecycle.get("seed") or {}, "seed")
         detectors = list((data.get("detectors") or {}).get("enabled") or [])
+        source_dir = data.get("sourceDir") or data.get("source_dir")
 
         return cls(
             id=target_id,
@@ -125,6 +127,7 @@ class WebTargetConfig:
             environment=environment,
             base_url=base_url,
             allowed_hosts=normalized_allowed,
+            source_dir=source_dir,
             scope=scope,
             reset=reset,
             seed=seed,

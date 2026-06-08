@@ -81,6 +81,10 @@ _SIGNAL_PATTERNS = {
     "database": re.compile(r"postgres|mysql|sqlite|prisma|drizzle|sql\b|select\b|insert\b|update\b", re.IGNORECASE),
     "secret-handling": re.compile(r"secret|api[_-]?key|password|token|private[_-]?key", re.IGNORECASE),
     "rate-limit": re.compile(r"rate\s*limit|ratelimit|throttle|bruteforce|lockout", re.IGNORECASE),
+    "crypto-weak": re.compile(r"md5|sha1|md4|rc4|des|3des|ecb|blowfish|arc4|cast128", re.IGNORECASE),
+    "crypto-hardcoded": re.compile(r"PRIVATE_KEY|SECRET_KEY|API_KEY|ACCESS_TOKEN|AUTH_TOKEN", re.IGNORECASE),
+    "header-missing": re.compile(r"csp|strict-transport-security|x-frame-options|x-content-type", re.IGNORECASE),
+    "header-leak": re.compile(r"x-powered-by|x-server|server:|x-aspnet|x-drupal", re.IGNORECASE),
 }
 _LANGUAGE_BY_SUFFIX = {
     ".cfg": "config",

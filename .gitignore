@@ -7,4 +7,5 @@ build/
 dist/
 *.egg-info/
 runs/
+.coverage
 .DS_Store

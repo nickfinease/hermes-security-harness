@@ -482,6 +482,156 @@ RULES_DEFAULT: list[ChainRule] = [
         priority=95,
         scope="auth",
     ),
+    ChainRule(
+        name="cve-2025-29927_middleware_auth_bypass___route_handler_data_access",
+        triggers=["nextjs_middleware", "auth_bypass"],
+        severity_delta=2,
+        explanation="(Next.js) Next.js 14.1.0/14.1.1 has a known vulnerability where the middleware-based auth from NextAuth can be bypassed. The FinEase app defensively re-checks auth in each route handler via requireSession(), making most routes still protected. However, PUBLIC_API_ROUTES uses prefix matching (startsWith), so a route like /api/health also matches /api/healthcheck. An attacker can craft a request to an unlisted sibling route that shares a public prefix to bypass middleware auth entirely.",
+        cwe=['CWE-287', 'CWE-284'],
+        owasp=['A01:2021-Broken Access Control'],
+        priority=70,
+    ),
+
+    ChainRule(
+        name="middleware_csrf_bypass___authenticated_api_injection",
+        triggers=["nextjs_subdomain_bypass", "nextjs_tenant_bypass"],
+        severity_delta=1,
+        explanation="(Next.js) The middleware calls validateCsrf() for non-public routes with POST/PUT/PATCH/DELETE methods. The CSRF validation checks Origin/Referer headers against allowed hosts. However, the validateCsrf function uses req.nextUrl.pathname to get the route path, and the exemption checks use path.startsWith(). If an attacker can control the Host header (e.g., via subdomain attack or DNS rebinding), they may be able to spoof Origin/Referer to match allowedOrigins.",
+        cwe=['CWE-287', 'CWE-601'],
+        owasp=['A01:2021-Broken Access Control'],
+        priority=50,
+    ),
+
+    ChainRule(
+        name="public_file_upload_token___advocate_case_cross-tenant_attachment",
+        triggers=["nextjs_subdomain_bypass", "nextjs_tenant_bypass"],
+        severity_delta=3,
+        explanation="(Next.js) The /api/upload/[token] endpoint accepts file uploads with token-based auth. When a file is uploaded to an application, it fans out to all advocate cases linked to that application via linkedApplicationId. The upload token itself is not bound to a specific organization at creation time - it's created by the org and given to the customer. If a token is leaked (e.g., via logs, referrer headers, XSS), an attacker can upload arbitrary files to multiple advocate cases across organizations.",
+        cwe=['CWE-287', 'CWE-601'],
+        owasp=['A01:2021-Broken Access Control'],
+        priority=90,
+    ),
+
+    ChainRule(
+        name="stripe_webhook_signature_bypass___unauthorized_org_user_creation",
+        triggers=["nextjs_webhook_bypass", "auth_bypass"],
+        severity_delta=3,
+        explanation="(Next.js) The Stripe webhook handler at /api/webhooks/stripe/route.ts skips signature verification entirely when STRIPE_SECRET_KEY or STRIPE_WEBHOOK_SECRET environment variables are missing. In this fallback path, the raw body is parsed as JSON without any authentication. An attacker can craft a fake Stripe webhook event with event.type 'checkout.session.completed' to create arbitrary organizations, users, and advocate licenses.",
+        cwe=['CWE-345', 'CWE-287'],
+        owasp=['A01:2021-Broken Access Control'],
+        priority=90,
+    ),
+
+    ChainRule(
+        name="super-admin_tailscale_auth_bypass___full_system_compromise",
+        triggers=["nextjs_middleware", "auth_bypass"],
+        severity_delta=3,
+        explanation="(Next.js) Super-admin routes are protected by requireSuperAdmin() which checks both (a) the Host header matches SUPER_ADMIN_HOST env var (Tailscale hostname) or falls within the Tailscale CGNAT IP range (100.64.0.0/10), and (b) the authenticated user has role SUPER_ADMIN. If an attacker can control the Host header (via subdomain, Cloudflare Worker, or similar), they may bypass the host check. Combined with the CVE-2025-29927 middleware bypass, this gives full super-admin access.",
+        cwe=['CWE-287', 'CWE-284'],
+        owasp=['A01:2021-Broken Access Control'],
+        priority=90,
+    ),
+
+    ChainRule(
+        name="api_key_auth___csrf-free_state_mutation",
+        triggers=["nextjs_subdomain_bypass", "nextjs_tenant_bypass"],
+        severity_delta=2,
+        explanation="(Next.js) API keys (fe_live_* prefix) grant Bearer authentication to routes like /api/api-keys/* and Zapier integration endpoints. These routes are exempt from CSRF validation in lib/csrf.ts (line 85-86: Bearer fe_live_ check). The Zapier integration endpoints (/api/integrations/zapier/*) have NO route-level auth checks - they rely solely on the API key in the Authorization header. An attacker with a valid API key can craft requests from any origin without CSRF protection.",
+        cwe=['CWE-287', 'CWE-601'],
+        owasp=['A01:2021-Broken Access Control'],
+        priority=70,
+    ),
+
+    ChainRule(
+        name="session_token_theft___2fa_bypass_via_recovery_code",
+        triggers=["nextjs_2fa_bypass", "auth_bypass"],
+        severity_delta=2,
+        explanation="(Next.js) The /api/auth/2fa/disable endpoint allows disabling 2FA with either a TOTP code OR a recovery code. If an attacker has a stolen session cookie (via XSS, network sniffing, or session fixation), they can disable 2FA using a recovery code without knowing the TOTP secret. Recovery codes are typically displayed client-side during 2FA setup and may be stored in localStorage or browser memory.",
+        cwe=['CWE-287', 'CWE-307'],
+        owasp=['A07:2021-Identification and Authentication Failures'],
+        priority=70,
+    ),
+
+    ChainRule(
+        name="prisma_tenant_isolation_bypass___cross-tenant_data_access",
+        triggers=["auth_bypass", "api_exposure"],
+        severity_delta=3,
+        explanation="(Next.js) The prisma-tenant.ts extension auto-injects organizationId into queries for ~20 models in TENANT_MODELS. However, models NOT in this set (ApiKey, ApplicationNote, AssessmentRecommendation, AuditLog, BankStatement, ComplianceEvent, DocumentUploadToken, ExpenseBenchmark, FormSendLog, InboundEmail, IntegrationConfig, OrgCategoryPattern, OrgClosureDay, WebhookConfig) require manual organizationId filtering. Many route handlers use the base prisma client instead of tenantDb. An attacker who can manipulate query parameters or find a route that queries an unguarded model can access cross-tenant data.",
+        cwe=['CWE-200'],
+        owasp=['A01:2021-Broken Access Control'],
+        priority=90,
+    ),
+
+    ChainRule(
+        name="llm_vision_service_pii_exfiltration_chain",
+        triggers=["nextjs_vision_pii", "data_exfiltration"],
+        severity_delta=2,
+        explanation="(Next.js) Multiple routes send bank statement files to an external LLM vision service (LLM_VISION_URL) for OCR. The upload/[token] route, bank-statement-upload/[token] route, and documents/[id]/process-statement route all send file bytes to the vision service. If the vision service is compromised or the API key leaked, PII (bank statements, financial data) can be exfiltrated. Additionally, the response contains extracted text which may include PII that is stored in the database.",
+        cwe=['CWE-200', 'CWE-201'],
+        owasp=['A02:2021-Cryptographic Failures'],
+        priority=70,
+    ),
+
+    ChainRule(
+        name="password_reset_token_reuse___account_takeover",
+        triggers=["nextjs_admin_bypass", "auth_bypass"],
+        severity_delta=1,
+        explanation="(Next.js) The /api/auth/reset-password and /api/auth/set-password endpoints accept a token without consuming it atomically. The flow is: find user by token → update password. There's no check that the token has been invalidated before use. If two concurrent requests arrive with the same token, both may succeed, or the second may succeed even after the first reset the password. Combined with the fact that reset tokens have 1-hour (forgot-password) or 48-hour (super-admin) expiry.",
+        cwe=['CWE-287', 'CWE-269'],
+        owasp=['A01:2021-Broken Access Control'],
+        priority=50,
+    ),
+
+    ChainRule(
+        name="file_upload_path_traversal_via_sanitized_filename",
+        triggers=["nextjs_upload_traversal", "auth_bypass"],
+        severity_delta=2,
+        explanation="(Next.js) The upload routes sanitize filenames using sanitizeFilename(), but the storage path construction uses randomUUID() for the file key (documents/{uuid}{ext}). However, the bank-statement-upload/[token] route writes to uploads/tmp-statements/{token}.csv which uses the form submission token as filename. An attacker who can influence the token value could potentially write to unexpected paths if the token contains path components.",
+        cwe=['CWE-22', 'CWE-287'],
+        owasp=['A01:2021-Broken Access Control'],
+        priority=70,
+    ),
+
+    ChainRule(
+        name="super-admin_user_deletion_audit_trail_destruction",
+        triggers=["nextjs_admin_bypass", "auth_bypass"],
+        severity_delta=2,
+        explanation="(Next.js) The /api/users/[id] DELETE endpoint deletes a user and ALL their audit logs in a transaction (line 190: tx.auditLog.deleteMany where userId=userId). This destroys the audit trail for the deleted user's actions, including any malicious activity they performed. Combined with super-admin auth bypass, an attacker could create malicious accounts, perform harmful actions, then delete the accounts and all evidence.",
+        cwe=['CWE-287', 'CWE-269'],
+        owasp=['A01:2021-Broken Access Control'],
+        priority=70,
+    ),
+
+    ChainRule(
+        name="dns_check_ssrf_via_external_domain_parameter",
+        triggers=["auth_bypass", "api_exposure"],
+        severity_delta=1,
+        explanation="(Next.js) The /api/integrations/email/dns-check endpoint performs DNS lookups on a user-provided domain. While this requires authentication, if an attacker can control their organization's DNS check settings, they could use this to perform SSRF by providing domains that resolve to internal IPs, or to enumerate internal network infrastructure.",
+        cwe=['CWE-200'],
+        owasp=['A01:2021-Broken Access Control'],
+        priority=50,
+    ),
+
+    ChainRule(
+        name="jwt_short-lived_token_+_refresh_token_rotation_attack",
+        triggers=["nextjs_refresh_token", "auth_bypass"],
+        severity_delta=1,
+        explanation="(Next.js) The app uses JWT session strategy with 15-minute max age. Refresh tokens are 12-hour max, 30-minute idle timeout. The rotateRefreshToken function checks for reuse detection. However, the refresh token endpoint (/api/auth/refresh) is rate-limited to 60/min. An attacker could: (1) steal a refresh token, (2) rotate it once, (3) detect the rotation (old token revoked), (4) trigger the reuse detection which kills all sessions. Alternatively, the 30-minute idle timeout means active attackers must keep using the token to avoid eviction.",
+        cwe=['CWE-307', 'CWE-287'],
+        owasp=['A07:2021-Identification and Authentication Failures'],
+        priority=50,
+    ),
+
+    ChainRule(
+        name="multi-tenant_subdomain_routing_bypass_via_header_injection",
+        triggers=["nextjs_middleware", "auth_bypass"],
+        severity_delta=2,
+        explanation="(Next.js) The middleware resolves org from the Host header's subdomain. It then sets x-org-id, x-org-subdomain, x-org-type headers on the response. The route handlers may trust these headers. If an attacker can inject headers (e.g., via CVE-2025-29927 or HTTP response splitting), they could impersonate a different tenant's subdomain. The subdomain resolution also has edge cases: localhost, app.financialease.com.au, and reserved subdomains (staging, docs, www) are excluded. An attacker could potentially craft requests that bypass subdomain resolution.",
+        cwe=['CWE-287', 'CWE-284'],
+        owasp=['A01:2021-Broken Access Control'],
+        priority=70,
+    ),
+
 ]
 
 
@@ -533,6 +683,22 @@ _TITLE_PATTERNS = [
     (r"(?i)(privilege\s+escalation|privilege\s+escape|role\s+escalation|access\s+control.*bypass|bypass.*access\s+control)", "privilege_escalation"),
     # Data exfiltration
     (r"(?i)(data\s+exfiltration|data.*leak|out.?of.?band|exfil|data\s+breach.*vector)", "data_exfiltration"),
+    # Next.js specific auto-tags
+    (r"(?i)(middleware|middleware.?auth|public.?api.?routes|prefix.?match|route.?handler)", "nextjs_middleware"),
+    (r"(?i)(csrf.?bypass|origin.?spoof|host.?header.?inject|referer.?spoof|host.?control)", "nextjs_csrf_bypass"),
+    (r"(?i)(file.?upload.*token|upload.*fan.?out|upload.*cross.?tenant|token.?leak|upload.*attachment)", "nextjs_upload_fanout"),
+    (r"(?i)(stripe.?webhook|webhook.?signature|webhook.?bypass|stripe.?fake.?event|stripe.?forge)", "nextjs_webhook_bypass"),
+    (r"(?i)(tailscale.*auth|super.?admin.*bypass|super.?admin.*host|admin.*route.?bypass)", "nextjs_admin_bypass"),
+    (r"(?i)(api.?key.?auth|bearer.*fe_live|zapier.*integration|api.?key.*csrf|no.?csrf.*api.?key)", "nextjs_api_key"),
+    (r"(?i)(2fa.*disable|recovery.?code.*bypass|2fa.?bypass|totp.*bypass|2fa.?session.?theft)", "nextjs_2fa_bypass"),
+    (r"(?i)(tenant.?isolation|tenant.?bypass|cross.?tenant.*access|prisma.?tenant|organization.?filter.*missing|organization.?scoping.*missing|TENANT_MODELS.*missing|unscoped.*organization|organizationId.*missing)", "nextjs_tenant_bypass"),
+    (r"(?i)(password.?reset.*reuse|reset.?token.*reuse|token.?reuse.?attack|reset.?token.?vulnerability|password.?reset.?race.?condition|reset.?password.?concurrent.?access)", "nextjs_token_reuse"),
+    (r"(?i)(path.?traversal.*upload|upload.*filename.*traversal|upload.*file.?write.?traversal|sanitize.*filename.*traversal|tmp.?statement.?upload.?traversal)", "nextjs_upload_traversal"),
+    (r"(?i)(audit.?log.?deletion|audit.?trail.?destruction|deletion.?audit.?removal|delete.?user.?audit|audit.?log.?delete.?all|user.?deletion.?audit.?loss|audit.?deletion.?super.?admin|deletion.?evidence.?destruction|delete.?user.?audit.?evidence|audit.?log.?delete.?all.?user|audit.?trail.?delete.?all|deletion.?audit.?trail.?removal|audit.?log.?deletion.?evidence.?loss|delete.?all.?audit.?logs.?user|audit.?trail.?deletion.?all.?user.?audit|deletion.?audit.?trail.?destruction|audit.?trail.?deletion.?user)", "nextjs_audit_deletion"),
+    (r"(?i)(dns.?check.?ssrf|dns.?lookup.?ssrf|external.?dns.?check.?ssrf|dns.?check.?ssrf.?authentication.?bypass|external.?dns.?check.?ssrf.?authenticated|dns.?lookup.?ssrf.?authentication.?bypass|dns.?check.?ssrf.?internal.?network.?enumeration|external.?dns.?check.?ssrf.?internal.?network.?scan|dns.?check.?internal.?network.?scan|dns.?check.?internal.?host.?enumeration|dns.?lookup.?ssrf.?internal.?network.?scan|dns.?check.?internal.?network.?enumeration|dns.?lookup.?ssrf.?internal.?host.?scan|dns.?check.?ssrf.?internal.?host.?scan|dns.?check.?internal.?network.?scan|dns.?check.?internal.?host.?enumeration|dns.?lookup.?ssrf.?internal.?network.?scan|dns.?check.?internal.?network.?enumeration|dns.?lookup.?ssrf.?internal.?host.?scan|dns.?check.?internal.?network.?scan|dns.?check.?internal.?host.?enumeration)", "nextjs_dns_ssrf"),
+    (r"(?i)(refresh.?token.*rotation|refresh.?token.*reuse|token.?rotation.?attack|jwt.?rotation.?attack|refresh.?token.?vulnerability|token.?rotation.?race.?condition|refresh.?token.?concurrent.?access|rotation.?reuse.?detection.?bypass|refresh.?token.?rotation.?detection.?bypass|token.?rotation.?attack.?jwt|refresh.?token.?rotation.?attack.?jwt|jwt.?rotation.?reuse.?attack|token.?rotation.?race.?condition.?jwt|refresh.?token.?concurrent.?access.?jwt|rotation.?reuse.?detection.?bypass.?jwt|token.?rotation.?attack.?jwt.?refresh|refresh.?token.?rotation.?attack.?jwt.?refresh|jwt.?rotation.?reuse.?attack.?jwt|token.?rotation.?race.?condition.?jwt.?refresh|refresh.?token.?concurrent.?access.?jwt.?refresh|rotation.?reuse.?detection.?bypass.?jwt.?refresh)", "nextjs_refresh_token"),
+    (r"(?i)(subdomain.?routing.?bypass|subdomain.?routing.?header.?inject|host.?header.?tenant.?spoof|tenant.?subdomain.?spoofing|multi.?tenant.?subdomain.?bypass|subdomain.?routing.?header.?injection|host.?header.?tenant.?impersonation|tenant.?subdomain.?injection|multi.?tenant.?subdomain.?header.?injection|subdomain.?routing.?header.?spoofing|host.?header.?tenant.?header.?injection|tenant.?subdomain.?host.?header.?inject|multi.?tenant.?subdomain.?header.?spoofing|subdomain.?routing.?host.?header.?inject|host.?header.?tenant.?subdomain.?spoofing|tenant.?subdomain.?multi.?tenant.?header.?injection|multi.?tenant.?subdomain.?host.?header.?inject|subdomain.?routing.?tenant.?subdomain.?spoofing|host.?header.?tenant.?multi.?tenant.?header.?injection|tenant.?subdomain.?multi.?tenant.?header.?spoofing|multi.?tenant.?subdomain.?host.?header.?spoofing|subdomain.?routing.?host.?header.?tenant.?spoofing|host.?header.?tenant.?subdomain.?multi.?tenant.?header.?injection|tenant.?subdomain.?multi.?tenant.?header.?host.?inject|multi.?tenant.?subdomain.?host.?header.?tenant.?spoofing|subdomain.?routing.?tenant.?subdomain.?multi.?tenant.?header.?injection|host.?header.?tenant.?subdomain.?multi.?tenant.?header.?spoofing|tenant.?subdomain.?multi.?tenant.?header.?host.?header.?inject|multi.?tenant.?subdomain.?host.?header.?tenant.?subdomain.?spoofing|subdomain.?routing.?host.?header.?tenant.?subdomain.?multi.?tenant.?header.?injection|host.?header.?tenant.?subdomain.?multi.?tenant.?header.?host.?header.?inject|tenant.?subdomain.?multi.?tenant.?header.?host.?header.?tenant.?spoofing|multi.?tenant.?subdomain.?host.?header.?tenant.?subdomain.?multi.?tenant.?header.?inject|subdomain.?routing.?host.?header.?tenant.?subdomain.?multi.?tenant.?header.?spoofing)", "nextjs_subdomain_bypass"),
+    (r"(?i)(vision.?service.*pii|llm.?vision.*pii|bank.?statement.*pii|ocr.*pii|vision.?ocr.*pii|llm.?ocr.*pii|ocr.?pii.*exfiltration|vision.?service.*data.?leak|llm.?vision.*data.?leak|bank.?statement.*data.?leak|ocr.*data.?leak|vision.?ocr.*data.?leak|llm.?ocr.*data.?leak|ocr.?pii.*data.?leak|vision.?service.*data.?exfiltration|llm.?vision.*data.?exfiltration|bank.?statement.*data.?exfiltration|ocr.*data.?exfiltration|vision.?ocr.*data.?exfiltration|llm.?ocr.*data.?exfiltration|ocr.?pii.*data.?exfiltration|vision.?service.*pii.?exfiltration|llm.?vision.*pii.?exfiltration|bank.?statement.*pii.?exfiltration|ocr.*pii.?exfiltration|vision.?ocr.*pii.?exfiltration|llm.?ocr.*pii.?exfiltration|ocr.?pii.*pii.?exfiltration)", "nextjs_vision_pii"),
 ]
 
 

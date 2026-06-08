@@ -10,6 +10,7 @@ Public API (``__all__``):
     build_user_input_surfaces_from_smoke,
     XSS_PAYLOADS, SQLI_PAYLOADS, SSRF_ENDPOINTS,
     run_injection_scan,
+    InjectionScanResult,
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ from urllib.request import Request
 from ._http_client import _make_http_request, make_url, new_run_id, write_json, _json_dumps
 from .artifacts import redact_secrets
 from .web_target import WebTargetConfig, load_target_config
+from .auth_client import auth_signin_nextauth
 
 
 # ── Authentication ──────────────────────────────────────────────────────────────
@@ -87,13 +89,32 @@ def _auth_login(
     status = resp.get("status") or 0
     set_cookies = resp.get("setCookies", {})
 
-    if set_cookies:
+    if set_cookies and "authjs.session-token" not in set_cookies:
+        # Standard cookie — return as-is
         return AuthenticationResult(
             success=True,
             authenticated=True,
             cookie_name=auth.get("cookie_name", "sessionid"),
             cookies=set_cookies,
         )
+
+    # No session cookie from standard login — try NextAuth flow
+    auth_result = auth_signin_nextauth(
+        base_url,
+        auth.get("username", ""),
+        auth.get("password", ""),
+        timeout=timeout,
+    )
+
+    if auth_result.get("authenticated"):
+        session_token = auth_result["cookies"].get("authjs.session-token", "")
+        if session_token:
+            return AuthenticationResult(
+                success=True,
+                authenticated=True,
+                cookie_name="authjs.session-token",
+                cookies={"authjs.session-token": session_token},
+            )
 
     return AuthenticationResult(
         success=True,
@@ -129,6 +150,7 @@ class UserInputSurface:
         confidence: How confident we are this is a real input surface.
         raw_body: Original request body if available.
         response_body: Response body for form discovery.
+        source: Where this surface was discovered (smoke, recon, default).
     """
 
     id: str
@@ -139,6 +161,7 @@ class UserInputSurface:
     confidence: str
     raw_body: str | None = None
     response_body: str | None = None
+    source: str = "smoke"
 
 
 def build_user_input_surfaces_from_smoke(
@@ -315,6 +338,104 @@ def _hash_url(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()[:8]
 
 
+def _extract_path_params(path: str) -> list[str]:
+    """Extract URL path parameters like :id or {id} from a route path.
+
+    Args:
+        path: Route path string (e.g., "/api/users/:id", "/api/users/{id}").
+
+    Returns:
+        List of parameter names (e.g., ["id"]).
+    """
+    params: list[str] = []
+    # Match :param and {param} patterns
+    for match in re.finditer(r':[a-zA-Z_]\w*', path):
+        params.append(match.group()[1:])  # Strip leading :
+    for match in re.finditer(r'\{([a-zA-Z_]\w*)\}', path):
+        params.append(match.group(1))
+    return params
+
+
+def _test_xss_path_param(surfaces: list[UserInputSurface], cookies: dict[str, str], timeout: float) -> _XssResult:
+    """Test XSS on URL path parameters (e.g., /api/users/<script>alert(1)</script>)."""
+    result = _XssResult()
+
+    for surface in surfaces:
+        if surface.type != InputSurfaceType.URL_PATH:
+            continue
+        for pp in surface.parameters:
+            for payload in XSS_PAYLOADS:
+                test_url = surface.url + "/" + quote(payload.payload, safe="")
+
+                resp = _make_http_request(
+                    test_url,
+                    cookies=cookies if cookies else None,
+                    timeout=timeout,
+                )
+                result.test_count += 1
+
+                step = {
+                    "name": f"xss-path-{surface.id}-{pp}-{payload.id}",
+                    "request": {
+                        "method": surface.method,
+                        "url": test_url,
+                        "payload": f"[xss/path-param/{pp}/{payload.id}]",
+                        "cookie": bool(cookies),
+                    },
+                    "status": resp["status"],
+                    "bodyBytes": resp.get("bodyBytes", b""),
+                }
+                result.steps.append(step)
+
+                xss_finding = _xss_finding(pp, test_url, resp, payload)
+                if xss_finding:
+                    xss_finding["affected"]["surface"] = surface.id
+                    xss_finding["affected"]["surfaceType"] = "url_path_param"
+                    result.findings.append(xss_finding)
+
+    return result
+
+
+def _test_sqli_path_param(surfaces: list[UserInputSurface], cookies: dict[str, str], timeout: float) -> _SqlInjectionResult:
+    """Test SQLi on URL path parameters (e.g., /api/users/1' OR 1=1--)."""
+    result = _SqlInjectionResult()
+
+    for surface in surfaces:
+        if surface.type != InputSurfaceType.URL_PATH:
+            continue
+        for pp in surface.parameters:
+            for payload in SQLI_PAYLOADS:
+                test_url = surface.url + "/" + quote(payload.payload, safe="")
+
+                resp = _make_http_request(
+                    test_url,
+                    cookies=cookies if cookies else None,
+                    timeout=timeout,
+                )
+                result.test_count += 1
+
+                step = {
+                    "name": f"sqli-path-{surface.id}-{pp}-{payload.id}",
+                    "request": {
+                        "method": surface.method,
+                        "url": test_url,
+                        "payload": f"[sqli/path-param/{pp}/{payload.id}]",
+                        "cookie": bool(cookies),
+                    },
+                    "status": resp["status"],
+                    "redirectTarget": resp.get("headers", {}).get("Location", ""),
+                }
+                result.steps.append(step)
+
+                sqli_finding = _sqli_finding(pp, test_url, resp, payload)
+                if sqli_finding:
+                    sqli_finding["affected"]["surface"] = surface.id
+                    sqli_finding["affected"]["surfaceType"] = "url_path_param"
+                    result.findings.append(sqli_finding)
+
+    return result
+
+
 def _has_form_tags(html: str) -> bool:
     """Check if HTML contains form tags."""
     return bool(re.search(r"<form", html, re.IGNORECASE))
@@ -483,8 +604,11 @@ def run_injection_scan(
     *,
     request_timeout_s: float = 5.0,
     request_timeout: float | None = None,  # alias for request_timeout_s
-    smoke_steps: list[dict[str, Any]] | None = None,  # Optional smoke scan results
+    smoke_steps: list[dict[str, Any]] | str | None = None,  # List, JSON file path, or artifact obj
     auth: dict[str, Any] | None = None,  # Optional auth credentials
+    recon_surfaces: list[dict[str, Any]] | None = None,  # Optional recon-discovered surfaces
+    recon_routes: list[dict[str, Any]] | str | None = None,  # Optional recon-discovered API routes or JSON file path
+    auth_cookies: dict[str, str] | None = None,  # Pre-existing cookies from auth scan
 ) -> InjectionScanResult:
     """Run an injection scan against a web target and write structured artifacts.
 
@@ -496,6 +620,12 @@ def run_injection_scan(
         smoke_steps: Optional smoke scan results to discover user input surfaces.
         auth: Optional auth credentials dict with login_url, username, password,
               cookie_name, protected_paths.
+        recon_surfaces: Optional list of recon-discovered surfaces (dicts with
+            url, input_type, parameter_name, method, source, confidence).
+        recon_routes: Optional list of recon-discovered API routes for URL path
+            parameter testing (dicts with path, methods).
+        auth_cookies: Optional pre-existing cookies from a prior auth scan run.
+            Takes priority over auth-login cookies.
 
     Returns:
         InjectionScanResult with findings and artifacts.
@@ -516,41 +646,218 @@ def run_injection_scan(
     auth_cfg = auth  # Save for later use in auth steps
     auth_result = _auth_login(base_url, auth, effective_timeout)
 
+    # Use pre-existing cookies from auth scan if provided, otherwise use login cookies
+    effective_cookies = auth_cookies or auth_result.cookies
+
     # Track login URL for auth steps in output
     login_url = f"{base_url}/{auth.get('login_url', '').lstrip('/')}" if auth else ""
 
-    # Discover user input surfaces from smoke scan results
+    # 1. Discover user input surfaces from smoke scan results
     surfaces: list[UserInputSurface] = []
+    smoke_source_count = 0
     if smoke_steps is not None:
         smoke_steps_list: list[dict[str, Any]] = []
         if isinstance(smoke_steps, str):
-            # smoke_steps is a path to the smoke scan JSON file
             import json
             with open(smoke_steps) as f:
                 smoke_data = json.load(f)
             smoke_steps_list = smoke_data.get("requests", smoke_data.get("steps", []))
         elif hasattr(smoke_steps, 'artifacts') and 'http_smoke' in smoke_steps.artifacts:
-            # smoke_steps is a HttpSmokeResult with artifacts
             import json
             smoke_path = smoke_steps.artifacts['http_smoke']
             with open(smoke_path) as f:
                 smoke_data = json.load(f)
             smoke_steps_list = smoke_data.get("requests", smoke_data.get("steps", []))
         surfaces = build_user_input_surfaces_from_smoke(smoke_steps_list)
+        smoke_source_count = len(surfaces)
         _write_surfaces_json(run_dir / "surfaces.json", surfaces)
     else:
         # Fallback: use default parameter names (backwards compatible)
         surfaces = _build_default_surfaces(base_url)
+        smoke_source_count = len(surfaces)
+
+    # 2. Merge recon-discovered surfaces (dedup by URL+param)
+    recon_count = 0
+    if recon_surfaces:
+        seen_ids: set[str] = set()
+        for s in surfaces:
+            seen_ids.add(s.id)
+        for rs in recon_surfaces:
+            surf_id = f"recon-{_hash_url(rs.get('url', ''))}-{rs.get('parameter_name', '')}"
+            if surf_id in seen_ids:
+                continue
+            seen_ids.add(surf_id)
+            input_type_str = rs.get("input_type", "query_param")
+            input_type_map = {
+                "query_param": InputSurfaceType.QUERY_PARAM,
+                "form_field": InputSurfaceType.BODY_FORM,
+                "path_param": InputSurfaceType.URL_PATH,
+                "header": InputSurfaceType.HEADER,
+                "cookie": InputSurfaceType.COOKIE,
+                "body_json": InputSurfaceType.BODY_JSON,
+            }
+            stype = input_type_map.get(input_type_str, InputSurfaceType.QUERY_PARAM)
+            if stype == InputSurfaceType.QUERY_PARAM and rs.get("method", "").upper() in ("POST", "PUT"):
+                stype = InputSurfaceType.BODY_FORM
+            surfaces.append(
+                UserInputSurface(
+                    id=surf_id,
+                    url=rs.get("url", ""),
+                    type=stype,
+                    method=rs.get("method", "GET").upper(),
+                    parameters=[rs.get("parameter_name", "")] if rs.get("parameter_name") else [],
+                    confidence=rs.get("confidence", "medium"),
+                    source="recon",
+                )
+            )
+            recon_count += 1
+
+    # Handle recon_routes: resolve from file path if string
+    resolved_routes: list[dict[str, Any]] = []
+    if recon_routes:
+        if isinstance(recon_routes, str):
+            try:
+                with open(recon_routes) as f:
+                    data = json.load(f)
+                    resolved_routes = data.get("routes", data.get("discovered_routes", [data])) if isinstance(data, dict) else data
+            except (FileNotFoundError, json.JSONDecodeError):
+                resolved_routes = []
+        elif hasattr(recon_routes, '__iter__'):
+            resolved_routes = list(recon_routes)
+
+    # 3. Add URL path parameter surfaces from recon routes
+    path_param_surfaces: list[UserInputSurface] = []
+    if recon_routes:
+        for route in recon_routes:
+            path = route.get("path", "")
+            path_params = _extract_path_params(path)
+            for pp in path_params:
+                for method in route.get("methods", ["GET"]):
+                    surf_id = f"path-param-{_hash_url(path)}-{pp}-{method.lower()}"
+                    path_param_surfaces.append(
+                        UserInputSurface(
+                            id=surf_id,
+                            url=f"{base_url}{path}",
+                            type=InputSurfaceType.URL_PATH,
+                            method=method.upper(),
+                            parameters=[pp],
+                            confidence="high",
+                            source="recon-route",
+                        )
+                    )
+
+    # 4. Add query params for discovered API routes (even without form info)
+    # Limit to prevent combinatorial explosion: max 50 routes, only those with user-facing params
+    api_param_surfaces: list[UserInputSurface] = []
+    if resolved_routes:
+        # Filter to only routes that look like they accept user input
+        user_param_indicators = ["id", "filter", "q", "search", "page", "sort", "sort_by", "status", "type", "role", "username", "email", "name", "file", "url", "redirect", "path", "token"]
+        user_param_routes = []
+        for route in resolved_routes:
+            p = route.get("path", "")
+            if not p:
+                continue
+            # Skip static/internal routes
+            if any(c in p.lower() for c in ["health", "readyz", "metrics", "swagger", "openapi", "docs", "favicon", "static", "_next"]):
+                continue
+            # Check if route path contains parameter-like segments
+            has_param_like = any(segment.isdigit() or segment == "_id" or segment.startswith(":") or segment.startswith("{") for segment in p.split("/"))
+            if has_param_like or any(indicator in p.lower() for indicator in user_param_indicators):
+                user_param_routes.append(route)
+
+        # Limit to top 20 routes to prevent explosion
+        for route in user_param_routes[:20]:
+            p = route.get("path", "")
+            for method in ["GET", "POST"]:
+                for param in ["id", "q", "filter"]:
+                    surf_id = f"api-param-{_hash_url(f'{base_url}{p}')}-{param}-{method.lower()}"
+                    api_param_surfaces.append(
+                        UserInputSurface(
+                            id=surf_id,
+                            url=f"{base_url}{p}",
+                            type=InputSurfaceType.QUERY_PARAM if method == "GET" else InputSurfaceType.BODY_FORM,
+                            method=method.upper(),
+                            parameters=[param],
+                            confidence="medium",
+                            source="recon-route",
+                        )
+                    )
+
+    surfaces.extend(path_param_surfaces)
+    surfaces.extend(api_param_surfaces)
+    total_paths = smoke_source_count + recon_count + len(path_param_surfaces) + len(api_param_surfaces)
+
+    # 5. Write full surface list with source info
+    surf_list = []
+    for s in surfaces:
+        item = {
+            "id": s.id,
+            "url": s.url,
+            "type": s.type.value,
+            "method": s.method,
+            "parameters": s.parameters,
+            "confidence": s.confidence,
+            "source": getattr(s, 'source', 'smoke'),
+        }
+        surf_list.append(item)
+    _write_surfaces_json(run_dir / "surfaces.json", surfaces)
 
     # Test XSS, SQLi, and SSRF on discovered surfaces
-    xss_results = _test_xss_on_surfaces(surfaces, auth_result.cookies, effective_timeout)
-    sqli_results = _test_sqli_on_surfaces(surfaces, auth_result.cookies, effective_timeout)
-    ssrf_results = _test_ssrf_on_surfaces(surfaces, auth_result.cookies, effective_timeout)
+    xss_results = _test_xss_on_surfaces(surfaces, effective_cookies, effective_timeout)
+    sqli_results = _test_sqli_on_surfaces(surfaces, effective_cookies, effective_timeout)
+    ssrf_results = _test_ssrf_on_surfaces(surfaces, effective_cookies, effective_timeout)
+
+    # 6. Test URL path parameter injection (unique for path params)
+    path_xss_results = _test_xss_path_param(path_param_surfaces, effective_cookies, effective_timeout)
+    path_sqli_results = _test_sqli_path_param(path_param_surfaces, effective_cookies, effective_timeout)
+
+    # Merge path param findings
+    path_xss_findings = path_xss_results.findings
+    path_sqli_findings = path_sqli_results.findings
 
     all_findings: list[dict[str, Any]] = []
     all_findings.extend(xss_results.findings)
     all_findings.extend(sqli_results.findings)
     all_findings.extend(ssrf_results.findings)
+    all_findings.extend(path_xss_findings)
+    all_findings.extend(path_sqli_findings)
+
+    # Detect auth-coverage: if all GET requests redirect to login, no public input vectors exist
+    all_xss_statuses = [s.get("status") for s in xss_results.steps] + \
+                       [s.get("status") for s in path_xss_results.steps]
+    all_sqli_statuses = [s.get("status") for s in sqli_results.steps] + \
+                        [s.get("status") for s in path_sqli_results.steps]
+    all_statuses = all_xss_statuses + all_sqli_statuses
+
+    # 307/302/301 = explicit auth redirect; 308 = Next.js canonical redirect (also blocks access)
+    auth_redirects = sum(1 for s in all_statuses if s in (307, 308, 302, 301))
+    total_get_tests = len(all_statuses)
+    if total_get_tests > 0 and auth_redirects >= total_get_tests * 0.5:
+        # Collect unique redirect targets from all test steps
+        redirect_targets: set[str] = set()
+        for s in xss_results.steps + sqli_results.steps + path_xss_results.steps + path_sqli_results.steps:
+            t = s.get("redirectTarget", "")
+            if t:
+                redirect_targets.add(t)
+        target_str = ", ".join(sorted(redirect_targets)) if redirect_targets else "none (self-redirects only)"
+
+        # Collect status codes
+        redirect_status_codes = sorted(set(s for s in all_statuses if s in (307, 308, 302, 301)))
+        status_str = ", ".join(str(s) for s in redirect_status_codes)
+
+        all_findings.append({
+            "schemaVersion": "finding/v1",
+            "id": "all-get-redirects-to-login",
+            "runId": run_id,
+            "targetId": target.id,
+            "detectorId": "injection-scan",
+            "title": "All tested GET surfaces redirect to login",
+            "description": f"Out of {total_get_tests} GET injection tests, {auth_redirects} ({auth_redirects*100//total_get_tests}%) returned redirect responses ({status_str}). Redirect targets: {target_str}. No public input vectors were detected — all tested surfaces require authentication.",
+            "severity": "informational",
+            "confidence": "high",
+            "affected": {"surfaces_tested": len(surfaces), "get_tests": total_get_tests, "auth_redirects": auth_redirects},
+            "remediation": {"summary": "If public input is expected, verify that those routes are intentionally protected."},
+        })
 
     warnings: list[str] = list(xss_results.warnings)
     warnings.extend(sqli_results.warnings)
@@ -587,10 +894,23 @@ def run_injection_scan(
             "authenticated": auth_result.authenticated,
             "cookieName": auth_result.cookie_name,
         },
+        "surfaces": {
+            "total": len(surfaces),
+            "bySource": {
+                "smoke": smoke_source_count,
+                "recon": recon_count,
+                "path_params": len(path_param_surfaces),
+                "api_routes": len(api_param_surfaces),
+            },
+        },
         "summary": {
-            "xssTests": xss_results.test_count,
-            "sqliTests": sqli_results.test_count,
+            "xssTests": xss_results.test_count + path_xss_results.test_count,
+            "sqliTests": sqli_results.test_count + path_sqli_results.test_count,
             "ssrfTests": ssrf_results.test_count,
+            "pathParamTests": path_xss_results.test_count + path_sqli_results.test_count,
+            "totalTests": (xss_results.test_count + path_xss_results.test_count) +
+                         (sqli_results.test_count + path_sqli_results.test_count) +
+                         ssrf_results.test_count,
             "findingCount": len(all_findings),
         },
         "authSteps": auth_steps,
@@ -599,8 +919,12 @@ def run_injection_scan(
         "xssTests": xss_results.to_dict(),
         "sqliTests": sqli_results.to_dict(),
         "ssrfTests": ssrf_results.to_dict(),
+        "pathParamTests": {
+            "xss": path_xss_results.to_dict(),
+            "sqli": path_sqli_results.to_dict(),
+        },
         "findings": all_findings,
-        "surfaces": [
+        "surfacesList": [
             {
                 "id": s.id,
                 "url": s.url,
@@ -608,6 +932,7 @@ def run_injection_scan(
                 "method": s.method,
                 "parameters": s.parameters,
                 "confidence": s.confidence,
+                "source": getattr(s, "source", "smoke"),
             }
             for s in surfaces
         ],
@@ -737,6 +1062,7 @@ def _test_xss(base_url: str, timeout: float) -> _XssResult:
                 },
                 "status": resp["status"],
                 "bodyBytes": resp["bodyBytes"],
+                "redirectTarget": resp.get("headers", {}).get("Location", ""),
             }
             result.steps.append(step)
 
@@ -777,6 +1103,7 @@ def _test_xss_on_surfaces(surfaces: list[UserInputSurface], cookies: dict[str, s
                         },
                         "status": resp["status"],
                         "bodyBytes": resp["bodyBytes"],
+                        "redirectTarget": resp.get("headers", {}).get("Location", ""),
                     }
                     result.steps.append(step)
 
@@ -815,6 +1142,7 @@ def _test_xss_on_surfaces(surfaces: list[UserInputSurface], cookies: dict[str, s
                         },
                         "status": resp["status"],
                         "bodyBytes": resp["bodyBytes"],
+                        "redirectTarget": resp.get("headers", {}).get("Location", ""),
                     }
                     result.steps.append(step)
 
@@ -849,6 +1177,7 @@ def _test_xss_on_surfaces(surfaces: list[UserInputSurface], cookies: dict[str, s
                         },
                         "status": resp["status"],
                         "bodyBytes": resp["bodyBytes"],
+                        "redirectTarget": resp.get("headers", {}).get("Location", ""),
                     }
                     result.steps.append(step)
 
@@ -941,6 +1270,7 @@ def _test_sqli(base_url: str, timeout: float) -> _SqlInjectionResult:
                     "payload": f"[sqli/{payload.category}]",
                 },
                 "status": resp["status"],
+                "redirectTarget": resp.get("headers", {}).get("Location", ""),
             }
             result.steps.append(step)
 
@@ -981,6 +1311,7 @@ def _test_sqli_on_surfaces(surfaces: list[UserInputSurface], cookies: dict[str, 
                             "cookie": bool(cookies),
                         },
                         "status": resp["status"],
+                        "redirectTarget": resp.get("headers", {}).get("Location", ""),
                     }
                     result.steps.append(step)
 
@@ -1018,6 +1349,7 @@ def _test_sqli_on_surfaces(surfaces: list[UserInputSurface], cookies: dict[str, 
                             "cookie": bool(cookies),
                         },
                         "status": resp["status"],
+                        "redirectTarget": resp.get("headers", {}).get("Location", ""),
                     }
                     result.steps.append(step)
 
@@ -1119,7 +1451,7 @@ def _test_ssrf(base_url: str, timeout: float) -> _SsrfResult:
                 "url": endpoint.url,
             },
             "status": resp["status"],
-            "redirect": resp.get("error"),
+            "redirectTarget": resp.get("headers", {}).get("Location", ""),
         }
         result.steps.append(step)
 
@@ -1171,7 +1503,7 @@ def _test_ssrf_on_surfaces(surfaces: list[UserInputSurface], cookies: dict[str, 
                             "cookie": bool(cookies),
                         },
                         "status": resp["status"],
-                        "redirect": resp.get("error"),
+                        "redirectTarget": resp.get("headers", {}).get("Location", ""),
                     }
                     result.steps.append(step)
 
