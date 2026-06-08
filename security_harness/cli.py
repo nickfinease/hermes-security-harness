@@ -16,7 +16,13 @@ from .rate_limit import RateLimitConfig, run_rate_limit_scan
 from .runners import AgentRunRequest, HermesCliRunner
 from .sandbox import SandboxPolicy, SandboxValidationError
 from .static_scan import DEFAULT_STATIC_TEMPLATE, run_static_scan
+from .scan_handler import handle_scan_command
 from .recon import run_recon
+from .csrf_scan import run_csrf_scan
+from .http_verb_scan import run_http_verb_scan
+from .idor_scan import run_idor_scan
+from .jwt_scan import run_jwt_scan
+from .stored_xss_scan import run_stored_xss_scan
 from .chains import run_chain_analysis, chain_to_finding, write_chain_report, ChainConfig
 from .report import ReportConfig, generate_report, generate_json_report, write_report, risk_matrix
 from .web_target import TargetValidationError, load_target_config
@@ -105,6 +111,39 @@ def build_parser() -> argparse.ArgumentParser:
     rate_limit.add_argument("--login-url", default="/login")
     rate_limit.add_argument("--signup-url", default="/signup")
 
+    # WSTG scan modules
+    csrf_parser = sub.add_parser("csrf", help="Test CSRF protection on endpoints")
+    csrf_parser.add_argument("config", help="Path to web-target/v1 YAML or JSON config")
+    csrf_parser.add_argument("--artifacts", default="runs")
+    csrf_parser.add_argument("--endpoints", default="", help="Comma-separated endpoints to test")
+    csrf_parser.add_argument("--request-timeout", type=float, default=5)
+
+    http_verb = sub.add_parser("http-verb", help="Test HTTP verb tampering")
+    http_verb.add_argument("config", help="Path to web-target/v1 YAML or JSON config")
+    http_verb.add_argument("--artifacts", default="runs")
+    http_verb.add_argument("--endpoints", default="", help="Comma-separated endpoints to test")
+    http_verb.add_argument("--request-timeout", type=float, default=5)
+
+    idor_parser = sub.add_parser("idor", help="Test IDOR vulnerabilities")
+    idor_parser.add_argument("config", help="Path to web-target/v1 YAML or JSON config")
+    idor_parser.add_argument("--artifacts", default="runs")
+    idor_parser.add_argument("--endpoints", default="", help="Comma-separated endpoints to test")
+    idor_parser.add_argument("--request-timeout", type=float, default=5)
+    idor_parser.add_argument("--login-url", default="/login")
+    idor_parser.add_argument("--user-session", default="")
+
+    jwt_parser = sub.add_parser("jwt", help="Test JWT security")
+    jwt_parser.add_argument("config", help="Path to web-target/v1 YAML or JSON config")
+    jwt_parser.add_argument("--artifacts", default="runs")
+    jwt_parser.add_argument("--endpoints", default="", help="Comma-separated endpoints to test")
+    jwt_parser.add_argument("--request-timeout", type=float, default=5)
+
+    stored_xss = sub.add_parser("stored-xss", help="Test stored XSS vulnerabilities")
+    stored_xss.add_argument("config", help="Path to web-target/v1 YAML or JSON config")
+    stored_xss.add_argument("--artifacts", default="runs")
+    stored_xss.add_argument("--endpoints", default="", help="Comma-separated endpoints to test")
+    stored_xss.add_argument("--request-timeout", type=float, default=5)
+
     job_start = sub.add_parser("job-start", help="Start a security harness job and return a job ID")
     job_start.add_argument("--workdir", required=True, help="Job registry work directory")
     job_start.add_argument("--scan-type", required=True, choices=["http-smoke", "static-scan", "poc-replay"])
@@ -164,6 +203,20 @@ def build_parser() -> argparse.ArgumentParser:
     chain.add_argument("--findings", nargs="+", required=True, help="Paths to scan result JSON files")
     chain.add_argument("--output", "-o", default="chains.json", help="Output file path")
     chain.add_argument("--min-priority", type=int, default=0, help="Minimum chain priority to include")
+
+    scan = sub.add_parser("scan", help="Run full security scan")
+    scan.add_argument("config", help="web-target/v1 config")
+    scan.add_argument("--artifacts", default="runs")
+    scan.add_argument("--request-timeout", type=float, default=10)
+    scan.add_argument("--max-turns", type=int, default=16)
+    scan.add_argument("--timeout", type=float, default=600)
+    scan.add_argument("--model", default=None)
+    scan.add_argument("--provider", default=None)
+    scan.add_argument("--no-static", action="store_true")
+    scan.add_argument("--no-injection", action="store_true")
+    scan.add_argument("--no-auth", action="store_true")
+    scan.add_argument("--no-recon", action="store_true")
+    scan.add_argument("--no-chain", action="store_true")
 
     return parser
 
@@ -402,6 +455,82 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result.to_summary(), indent=2))
         return 0 if result.success else 1
 
+    # --- WSTG scan modules ---
+    if args.command == "csrf":
+        try:
+            endpoints = [e.strip() for e in args.endpoints.split(",") if e.strip()] or None
+            result = run_csrf_scan(
+                args.config,
+                endpoints=endpoints,
+                artifacts_root=args.artifacts,
+                request_timeout=args.request_timeout,
+            )
+        except (TargetValidationError, OSError, ValueError) as exc:
+            print(json.dumps({"success": False, "error": str(exc)}))
+            return 2
+        print(json.dumps(result.to_summary(), indent=2))
+        return 0 if result.success else 1
+
+    if args.command == "http-verb":
+        try:
+            endpoints = [e.strip() for e in args.endpoints.split(",") if e.strip()] or None
+            result = run_http_verb_scan(
+                args.config,
+                endpoints=endpoints,
+                artifacts_root=args.artifacts,
+                request_timeout=args.request_timeout,
+            )
+        except (TargetValidationError, OSError, ValueError) as exc:
+            print(json.dumps({"success": False, "error": str(exc)}))
+            return 2
+        print(json.dumps(result.to_summary(), indent=2))
+        return 0 if result.success else 1
+
+    if args.command == "idor":
+        try:
+            endpoints = [e.strip() for e in args.endpoints.split(",") if e.strip()] or None
+            result = run_idor_scan(
+                args.config,
+                endpoints=endpoints,
+                artifacts_root=args.artifacts,
+                request_timeout=args.request_timeout,
+            )
+        except (TargetValidationError, OSError, ValueError) as exc:
+            print(json.dumps({"success": False, "error": str(exc)}))
+            return 2
+        print(json.dumps(result.to_summary(), indent=2))
+        return 0 if result.success else 1
+
+    if args.command == "jwt":
+        try:
+            endpoints = [e.strip() for e in args.endpoints.split(",") if e.strip()] or None
+            result = run_jwt_scan(
+                args.config,
+                endpoints=endpoints,
+                artifacts_root=args.artifacts,
+                request_timeout=args.request_timeout,
+            )
+        except (TargetValidationError, OSError, ValueError) as exc:
+            print(json.dumps({"success": False, "error": str(exc)}))
+            return 2
+        print(json.dumps(result.to_summary(), indent=2))
+        return 0 if result.success else 1
+
+    if args.command == "stored-xss":
+        try:
+            endpoints = [e.strip() for e in args.endpoints.split(",") if e.strip()] or None
+            result = run_stored_xss_scan(
+                args.config,
+                endpoints=endpoints,
+                artifacts_root=args.artifacts,
+                request_timeout=args.request_timeout,
+            )
+        except (TargetValidationError, OSError, ValueError) as exc:
+            print(json.dumps({"success": False, "error": str(exc)}))
+            return 2
+        print(json.dumps(result.to_summary(), indent=2))
+        return 0 if result.success else 1
+
     if args.command == "recon":
         try:
             known_auth = [p.strip() for p in args.known_auth.split(",") if p.strip()] if args.known_auth else None
@@ -525,6 +654,8 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             print(json.dumps({"success": False, "error": str(exc)}))
             return 2
+    if args.command == "scan":
+        sys.exit(handle_scan_command(args))
 
     raise AssertionError(f"unknown command {args.command}")
 
