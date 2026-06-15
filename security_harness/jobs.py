@@ -138,8 +138,8 @@ def run_job_worker(workdir: str | Path, job_id: str) -> dict[str, Any]:
             "artifacts": result.get("artifacts", {}),
             "error": None if result.get("success") else result.get("error"),
         })
-        _write_json(_job_path(root, job_id), final)
         _publish_report(root, job_id, result)
+        _write_json(_job_path(root, job_id), final)
         return final
     except Exception as exc:
         final = read_job(root, job_id)

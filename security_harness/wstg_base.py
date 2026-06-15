@@ -5,12 +5,12 @@ reducing code duplication across scan modules.
 """
 from __future__ import annotations
 
-import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ._http_client import new_run_id, write_json
+from .web_target import load_target_config
 
 
 # --- Base Result class ---
@@ -91,20 +91,18 @@ def _run_scan(
         dict with success, error, and result fields.
     """
     try:
-        with open(config_path) as f:
-            raw = yaml.safe_load(f)
-
-        target_id = raw.get("id", "unknown")
-        base_url = raw.get("baseUrl", "").rstrip("/")
+        target = load_target_config(config_path)
+        target_id = target.id
+        base_url = target.base_url.rstrip("/")
 
         all_findings: list[dict[str, Any]] = []
         total_requests = 0
         endpoints = list(extra_endpoints or [])
 
-        # Load endpoints from config if available
-        config_endpoints = raw.get("detectors", {}).get("enabled", [])
-        if config_endpoints and not extra_endpoints:
-            endpoints.extend(str(e) for e in config_endpoints)
+        # Load endpoint paths from target scope when the caller does not
+        # provide explicit endpoints. Detector names are not URL paths.
+        if not extra_endpoints:
+            endpoints.extend(str(e) for e in target.scope.include_paths)
 
         for endpoint in endpoints:
             try:

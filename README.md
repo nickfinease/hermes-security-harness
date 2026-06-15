@@ -110,6 +110,38 @@ Current high-level flow:
 
 This is the safest default because it avoids the common false-negative pattern where scanners are run independently and never receive discovered routes, forms, cookies, or smoke paths from earlier stages.
 
+## Architecture and data flow
+
+The harness is organized around a small set of shared contracts and scanner modules:
+
+1. **Target config and safety** — `web_target.py` loads `web-target/v1` configs, validates allowed hosts, rejects unsafe environments, and provides the source directory and scope used by scanners.
+2. **CLI dispatch** — `cli.py` exposes the operator commands and adapts CLI arguments into scanner calls.
+3. **Full scan orchestration** — `scan_handler.py` coordinates the scanner data flow for `security-harness scan`.
+4. **Scanner execution** — individual scanner modules write JSON artifacts and return typed summaries where available.
+5. **Artifact consumers** — `chains.py`, `chain_reasoning.py`, `report.py`, and the async `jobs.py` worker consume scanner findings and publish follow-on artifacts.
+
+The most important runtime data flow is:
+
+```text
+target.yaml
+  └─ load_target_config() safety gates
+      ├─ http_smoke → request/status/header artifacts
+      ├─ auth_scan → authenticated session/cookie artifacts
+      ├─ recon → discovered routes/forms/surfaces
+      └─ static_scan → source inventory/findings
+
+smoke + auth + recon context
+  └─ injection_scan → XSS/SQLi/SSRF findings
+
+all findings
+  ├─ WSTG focused scanners
+  ├─ deterministic chain correlation
+  ├─ optional LLM chain hypotheses
+  └─ final report artifacts
+```
+
+Focused WSTG scanners (`csrf`, `http-verb`, `idor`, `jwt`, `stored-xss`) use concrete endpoint paths from `--endpoints` when provided, otherwise they default to `scope.includePaths` from the target config. Detector names under `detectors.enabled` are not endpoint paths.
+
 ## Focused scanner examples
 
 ```bash
@@ -254,6 +286,7 @@ examples/              local toy target and sample configs
 - Use `runs/` or `runs-*` for scan outputs.
 - Do not commit scan outputs unless a fixture is intentionally added under `tests/` or `examples/`.
 - Credentials captured by engagement/intake helpers are encrypted, but engagement files should still be treated as sensitive operational artifacts.
+- Async jobs publish reports before the terminal `succeeded`/`failed` status is written; when `job-status` returns `succeeded`, `job-report` should be available immediately.
 - Before opening a PR or pushing main, run:
 
 ```bash
@@ -268,6 +301,9 @@ These are tracked as GitHub issues when identified during maintenance:
 - End-to-end verification of the engagement + phased pipeline flow against a live authorized FinEase/local target.
 - Expose and test first-class CLI commands for `intake` and `pipeline` if the engagement workflow is intended to be operator-facing rather than Python-only.
 - Decide whether `tls_scan.py` should have a public CLI command and full pipeline integration.
+- Harden full-scan execution status so required stage failures cannot look successful to CI/gateway callers.
+- Remove project-local assumptions such as the `/home/beans/FinEase` static-scan fallback from public scan behavior.
+- Refactor recon/injection/CLI internals to reduce global mutable state, duplicated dispatch boilerplate, and scanner-specific result schemas.
 
 ## License
 
