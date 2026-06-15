@@ -5,7 +5,7 @@ description = "Hermes-native defensive security harness for authorized source-ba
 requires-python = ">=3.11"
 license = "Apache-2.0"
 readme = "README.md"
-dependencies = ["pyyaml>=6.0"]
+dependencies = ["cryptography>=42.0", "pyyaml>=6.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]

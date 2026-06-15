@@ -2,60 +2,246 @@
 
 Hermes-native defensive security harness for authorized, source-backed web targets.
 
-This repository is an MVP scaffold inspired by Anthropic's defending-code reference harness, but replaces Claude Code headless execution with a provider-agnostic `AgentRunner` abstraction and a first implementation that drives Hermes headlessly via `hermes chat`.
+The harness combines deterministic scanners, source-aware reconnaissance, structured artifact contracts, and optional Hermes/LLM-assisted reasoning. It is built for local and staging assessments where the operator controls the target and can provide explicit scope.
 
 ## Safety posture
 
-- Staging/local targets only by default.
-- Explicit allowed-host checks.
-- Public production URLs are rejected. Public staging domains also require an operator-controlled allowlist via `SECURITY_HARNESS_APPROVED_STAGING_HOSTS`; target-controlled YAML alone cannot approve a public host.
+- Local/staging targets only by default.
+- Explicit `allowedHosts` checks on every target config.
+- Public production URLs are rejected. Public staging domains require an operator-controlled allowlist via `SECURITY_HARNESS_APPROVED_STAGING_HOSTS`; target-controlled YAML alone cannot approve a public host.
 - Metadata IPs and redirect escapes are blocked.
-- Agent runs capture transcripts and command metadata.
-- Dynamic scans should run in an external sandbox; this MVP provides validation, artifact contracts, runner plumbing, and plugin scaffolding.
+- Dynamic PoC replay is gated behind sandbox/egress/no-credential/ephemeral-home checks for mutation-capable PoCs.
+- Agent/static runs capture transcripts and command metadata as artifacts.
+- Scan artifacts are written under `runs/` or `runs-*` directories and should not be committed.
 
-## MVP components
+## Current capabilities
 
-- `security_harness.runners.HermesCliRunner` — headless Hermes CLI runner.
-- `security_harness.web_target.WebTargetConfig` — authorized web target config and URL safety gates.
-- `security_harness.artifacts` — HTTP PoC, finding, grader, and report contracts.
-- `security_harness.http_smoke` — deterministic GET-only reachability, redirect-allowlist, and security-header smoke checks for explicit local/staging paths.
-- `security_harness.poc_replay` — HTTP PoC replay with grader artifacts and hard gates for mutation-capable dynamic replay.
-- `security_harness.jobs` — JSON job registry/worker for gateway-safe start/status/report polling.
-- `security_harness.static_scan` — read-only source/static scan orchestration that writes `source-inventory.json`, `threat-model.md`, `prompt.txt`, `findings.json`, inert `patchCandidates`, `report.md`, and captured Hermes runner artifacts.
-- `plugins/hermes_security_harness` — Hermes plugin exposing validate/start/status/report tools.
+| Area | Commands / modules | Notes |
+|---|---|---|
+| Target validation | `validate-target` | Validates `web-target/v1` YAML/JSON configs and safety gates. |
+| HTTP smoke | `http-smoke` | Deterministic GET-only reachability plus security-header checks. |
+| Source/static review | `static-scan` | Source inventory, threat model, structured findings, optional Hermes runner review. |
+| Reconnaissance | `recon` | Forms, OpenAPI/Swagger, sitemap, JS bundle, hidden endpoints, filesystem/source-dir route discovery, staged unauth/auth support in Python API. |
+| Injection testing | `injection-scan` | XSS, SQLi, SSRF payload testing with smoke/recon/auth surface support in the full `scan` flow. |
+| Auth/session testing | `auth-scan` | Login flow, cookie checks, bypass tests, rate checks. |
+| WSTG modules | `csrf`, `http-verb`, `idor`, `jwt`, `stored-xss` | OWASP WSTG-aligned focused scanners. |
+| TLS | `security_harness.tls_scan` Python module | TLS/SSL configuration testing module. CLI wiring is not yet exposed. |
+| Dependencies | `dependency-audit` | Lockfile parsing and CVE cross-reference. |
+| Rate limiting | `rate-limit` | Burst checks against configured endpoints. |
+| PoC replay | `replay-poc` | Structured HTTP PoC replay with sandbox gates. |
+| Chain correlation | `chain` | Deterministic vulnerability chain correlation across findings. |
+| Reporting | `report` | Structured report generation from findings JSON files. |
+| Full scan | `scan` | Orchestrates smoke → static → auth → recon → injection → chain → LLM chain reasoning/report. |
+| Async jobs | `job-start`, `job-status`, `job-report`, `job-worker` | JSON job registry/worker for gateway-safe polling. |
+
+## Install and test
+
+```bash
+cd /home/beans/hermes-security-harness
+uv venv
+uv pip install -e '.[dev]'
+.venv/bin/python -m pytest tests/ -q
+.venv/bin/python -m security_harness.cli --help
+```
+
+If `security-harness` is on your PATH after editable install, the examples below can use `security-harness` directly. Otherwise use `.venv/bin/python -m security_harness.cli`.
+
+## Target config
+
+Create a `web-target/v1` config for an authorized local/staging target:
+
+```yaml
+schemaVersion: web-target/v1
+id: my-target
+name: My Target
+environment: local
+baseUrl: http://localhost:3000
+allowedHosts:
+  - localhost
+  - 127.0.0.1
+sourceDir: /path/to/source  # optional; enables source-backed route discovery
+scope:
+  includePaths: ["/", "/login", "/api/health"]
+  excludePaths: ["/.env", "/debug"]
+  maxRequests: 100
+  maxRuntimeSeconds: 300
+detectors:
+  enabled: [reachability-smoke, security-headers-smoke]
+safety:
+  requireLocalOrStaging: true
+  requireAllowedHostMatch: true
+  blockCloudMetadataIps: true
+```
 
 ## Quick smoke
 
 ```bash
-uv venv
-uv pip install -e '.[dev]'
-pytest -q
 security-harness validate-target examples/web-target.local.yaml
+
 security-harness http-smoke examples/web-target.local.yaml \
   --artifacts runs/http-smoke
-# http-smoke never crawls wildcard includePaths; add concrete paths such as
-# /login or /api/health to the target config for broader reachability checks.
+
 security-harness static-scan examples/web-target.local.yaml \
   --source-root . \
   --artifacts runs/static-smoke \
-  --toolsets file
-security-harness job-start \
-  --workdir runs/jobs \
-  --scan-type http-smoke \
-  --config examples/web-target.local.yaml
-# Replay read-only PoCs directly. Mutation-capable PoCs require sandbox flags,
-# concrete required reset/seed lifecycle commands, an ephemeral home,
-# a base-origin egress allowlist, and no credential mounts.
+  --toolsets file \
+  --skip-agent
+```
+
+`http-smoke` never crawls wildcard `includePaths`; add concrete paths such as `/login` or `/api/health` to the target config for broader reachability checks.
+
+## Full scan pipeline
+
+The `scan` command is the preferred path when you want scanner outputs to feed later stages:
+
+```bash
+security-harness scan target.yaml --artifacts runs
+```
+
+Current high-level flow:
+
+1. HTTP smoke
+2. Static/source scan
+3. Auth scan
+4. Recon
+5. Injection scan using upstream smoke/recon/auth context where available
+6. Deterministic chain correlation
+7. LLM-assisted recursive chain reasoning/report artifacts where configured
+
+This is the safest default because it avoids the common false-negative pattern where scanners are run independently and never receive discovered routes, forms, cookies, or smoke paths from earlier stages.
+
+## Focused scanner examples
+
+```bash
+security-harness recon target.yaml \
+  --artifacts runs/recon \
+  --max-depth 2 \
+  --max-pages 50
+
+security-harness auth-scan target.yaml \
+  --login-url http://localhost:3000/login \
+  --username user@example.com \
+  --password 'REDACTED' \
+  --artifacts runs/auth
+
+security-harness injection-scan target.yaml \
+  --artifacts runs/injection \
+  --request-timeout 10
+
+security-harness csrf target.yaml --endpoints /api/profile,/api/settings
+security-harness idor target.yaml --endpoints /api/users/1,/api/users/2
+security-harness jwt target.yaml --endpoints /api/me
+security-harness http-verb target.yaml --endpoints /api/resource
+security-harness stored-xss target.yaml --endpoints /comments,/profile
+```
+
+## PoC replay
+
+Read-only PoCs can be replayed directly:
+
+```bash
 security-harness replay-poc \
   examples/toy-vulnerable-app/web-target.yaml \
   examples/toy-vulnerable-app/pocs/unsafe-redirect.json \
   --artifacts runs/poc-smoke
 ```
 
-## Not yet included
+Mutation-capable PoCs require sandbox flags, concrete reset/seed lifecycle commands, an ephemeral home, a base-origin egress allowlist, and no credential mounts.
 
-- Browser automation.
-- Real OS-level sandbox launchers; mutation-capable replay is currently blocked unless the operator supplies sandbox/egress/no-credential/ephemeral-home gates.
-- Full detector payload library beyond safe HTTP smoke and structured PoC replay.
+## Chain correlation and reports
 
-Those should be added behind explicit sandbox gates after this harness remains boring and test-covered.
+```bash
+security-harness chain \
+  --findings runs/**/injection-scan.json runs/**/auth-scan.json \
+  --output runs/chains.json
+
+security-harness report \
+  --findings runs/**/injection-scan.json runs/**/auth-scan.json runs/chains.json \
+  --config target.yaml \
+  --output runs/report.md
+```
+
+Reports include risk summaries, evidence, OWASP/MITRE-style mappings, CVSS-like scoring, and remediation guidance where available.
+
+## Python API highlights
+
+```python
+from security_harness import (
+    run_http_smoke,
+    run_static_scan,
+    run_recon,
+    run_auth_scan,
+    run_injection_scan,
+    run_chain_analysis,
+)
+
+smoke = run_http_smoke("target.yaml", "runs")
+recon = run_recon("target.yaml", "runs")
+auth = run_auth_scan("target.yaml", artifacts_root="runs")
+injection = run_injection_scan(
+    "target.yaml",
+    "runs",
+    recon_surfaces=[s.__dict__ for s in recon.surfaces],
+    recon_routes=recon.discovered_routes,
+)
+```
+
+Prefer the `scan` CLI for normal use; use the Python API when composing custom workflows or tests.
+
+## Project structure
+
+```text
+security_harness/
+  _http_client.py      shared HTTP client: redirects, cookies, errors, redaction
+  web_target.py        target config loader and safety validation
+  http_smoke.py        deterministic GET-only reachability + headers
+  static_scan.py       source inventory + optional Hermes runner review
+  recon.py             recon discovery, source-dir route discovery, staged recon helpers
+  auth_scan.py         login/session/cookie/bypass/rate tests
+  auth_client.py       authenticated session replay helpers
+  injection_scanner.py XSS/SQLi/SSRF testing
+  dependency_audit.py  lockfile parsing + CVE cross-reference
+  rate_limit.py        burst request rate-limit checks
+  csrf_scan.py         WSTG 4.6.05 CSRF testing
+  http_verb_scan.py    WSTG 4.7.03 HTTP verb tampering
+  idor_scan.py         WSTG 4.5.04 IDOR/BOLA testing
+  jwt_scan.py          WSTG 4.6.10 JWT weakness testing
+  stored_xss_scan.py   WSTG 4.7.02 stored XSS testing
+  tls_scan.py          TLS/SSL configuration testing
+  chains.py            deterministic vulnerability chain rules
+  chain_reasoning.py   recursive LLM-assisted chain hypotheses
+  engagement.py        engagement state + encrypted credentials
+  intake.py            interactive intake helpers
+  findings.py          accumulated findings with dedup/severity upgrades
+  pipeline.py          WSTG-aligned phase orchestration primitives
+  chain_gate.py        LLM reasoning gates between phases
+  scan_handler.py      full scan command orchestration
+  cli.py               CLI entrypoint
+contracts/             JSON schemas for artifact contracts
+plugins/               Hermes plugin scaffold
+examples/              local toy target and sample configs
+```
+
+## Artifact and git hygiene
+
+- Use `runs/` or `runs-*` for scan outputs.
+- Do not commit scan outputs unless a fixture is intentionally added under `tests/` or `examples/`.
+- Credentials captured by engagement/intake helpers are encrypted, but engagement files should still be treated as sensitive operational artifacts.
+- Before opening a PR or pushing main, run:
+
+```bash
+git status --short
+.venv/bin/python -m pytest tests/ -q
+```
+
+## Known remaining work
+
+These are tracked as GitHub issues when identified during maintenance:
+
+- End-to-end verification of the engagement + phased pipeline flow against a live authorized FinEase/local target.
+- Expose and test first-class CLI commands for `intake` and `pipeline` if the engagement workflow is intended to be operator-facing rather than Python-only.
+- Decide whether `tls_scan.py` should have a public CLI command and full pipeline integration.
+
+## License
+
+Apache-2.0
