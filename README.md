@@ -163,6 +163,33 @@ security-harness report \
 
 Reports include risk summaries, evidence, OWASP/MITRE-style mappings, CVSS-like scoring, and remediation guidance where available.
 
+## LLM-assisted vulnerability chaining
+
+There are two chain-analysis paths:
+
+1. `security-harness chain` is deterministic. It auto-tags findings and applies table-driven correlation rules from `security_harness/chains.py`. This command does not call an LLM.
+2. The full `security-harness scan ...` flow can run recursive LLM chain reasoning after deterministic chain correlation. The implementation lives in `security_harness/chain_reasoning.py` and is invoked from `security_harness/scan_handler.py`.
+
+Current behavior in the full scan path:
+
+- Step `[6/7]` runs deterministic chain correlation.
+- Step `[7/7]` runs `run_recursive_chain_analysis(...)` only when findings exist and deterministic chain analysis produced at least one chain.
+- The LLM prompt is built from up to 50 findings plus existing chain context.
+- The LLM is asked to return a JSON array of multi-hop chain hypotheses.
+- Successful hypotheses are written to `llm_chains.json` in the scan artifact directory.
+- Each hypothesis is marked as requiring validation; this is intended as analyst guidance, not a deterministic finding.
+
+Example full-scan invocation:
+
+```bash
+security-harness scan target.yaml \
+  --artifacts runs/full-scan \
+  --provider openai-api \
+  --model local-qwen36-nvfp4
+```
+
+If no `llm_chains.json` appears, check the scan output. The current implementation skips LLM chain reasoning when deterministic chain correlation returns zero chains, even if individual findings exist.
+
 ## Python API highlights
 
 ```python
