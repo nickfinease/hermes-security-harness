@@ -217,6 +217,13 @@ def build_parser() -> argparse.ArgumentParser:
     scan.add_argument("--no-auth", action="store_true")
     scan.add_argument("--no-recon", action="store_true")
     scan.add_argument("--no-chain", action="store_true")
+    scan.add_argument("--engagement", default=None, help="Target ID for a pre-saved engagement file with credentials (from 'intake' command)")
+
+    intake = sub.add_parser("intake", help="Interactive pre-engagement credential capture")
+    intake.add_argument("config", help="Path to web-target/v1 YAML or JSON config")
+    intake.add_argument("--target-id", help="Override target ID for engagement storage (defaults to config id)")
+    intake.add_argument("--no-credentials", action="store_true", help="Skip credential prompts")
+    intake.add_argument("--no-context", action="store_true", help="Skip context prompts")
 
     return parser
 
@@ -656,6 +663,21 @@ def main(argv: list[str] | None = None) -> int:
             return 2
     if args.command == "scan":
         sys.exit(handle_scan_command(args))
+
+    if args.command == "intake":
+        from .intake import prompt_intake
+        target_id = args.target_id or load_target_config(args.config).id
+        engagement = prompt_intake(
+            target_id=target_id,
+            config_path=args.config,
+            ask_credentials=not args.no_credentials,
+            ask_context=not args.no_context,
+        )
+        print(f"\nEngagement saved: {engagement.path}")
+        print(f"  Target: {engagement.target_id}")
+        print(f"  Credentials stored for roles: {', '.join(engagement.credentials.keys()) or '(none)'}")
+        print(f"\nUse with scan: security-harness scan <config> --engagement {target_id}")
+        return 0
 
     raise AssertionError(f"unknown command {args.command}")
 

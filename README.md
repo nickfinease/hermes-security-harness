@@ -298,11 +298,11 @@ git status --short
 
 These are tracked as GitHub issues when identified during maintenance:
 
-- End-to-end verification of the engagement + phased pipeline flow against a live authorized FinEase/local target.
+- End-to-end verification of the engagement + phased pipeline flow against a live authorized local target.
 - Expose and test first-class CLI commands for `intake` and `pipeline` if the engagement workflow is intended to be operator-facing rather than Python-only.
 - Decide whether `tls_scan.py` should have a public CLI command and full pipeline integration.
 - Harden full-scan execution status so required stage failures cannot look successful to CI/gateway callers.
-- Remove project-local assumptions such as the `/home/beans/FinEase` static-scan fallback from public scan behavior.
+- Ensure `sourceDir` is always set in target configs when static scan or dependency audit is expected (avoid silent skips).
 - Refactor recon/injection/CLI internals to reduce global mutable state, duplicated dispatch boilerplate, and scanner-specific result schemas.
 
 ## License

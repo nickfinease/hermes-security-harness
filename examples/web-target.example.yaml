@@ -1,12 +1,12 @@
 schemaVersion: web-target/v1
-id: finese-local
-name: FinEase Local
+id: local-target
+name: Local Web App
 environment: local
 baseUrl: http://localhost:3000
 allowedHosts:
   - localhost
   - 127.0.0.1
-sourceDir: /home/beans/FinEase
+sourceDir: /path/to/your/app  # Set this to your app's source root for filesystem route discovery + static scan
 scope:
   includePaths:
     - /
@@ -16,14 +16,21 @@ scope:
     - /api/auth/csrf
     - /api/auth/signin
     - /api/auth/signout
+    - /api/auth/callback/credentials
     - /dashboard
-    - /about
-  maxRequests: 15
-  maxRuntimeSeconds: 60
+  maxRequests: 30
+  maxRuntimeSeconds: 120
 detectors:
   enabled:
     - reachability-smoke
     - security-headers-smoke
+    - injection
+    - auth-flow
+    - rate-limit
+    - dependency-audit
+    - static-scan
+    - recon
+    - chain-analysis
 safety:
   requireLocalOrStaging: true
   requireAllowedHostMatch: true

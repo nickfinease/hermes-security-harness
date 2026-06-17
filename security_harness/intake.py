@@ -5,7 +5,7 @@ a security assessment begins. Stores everything encrypted in an
 engagement file for use by subsequent pipeline phases.
 
 Usage:
-    security-harness intake --target finese --config target-finese.yaml
+    security-harness intake --target my-app --config target.yaml
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def prompt_intake(
     """Run interactive intake for a target.
 
     Args:
-        target_id: Target identifier (e.g., "finese").
+        target_id: Target identifier (e.g., "my-app").
         config_path: Path to web-target/v1 config file.
         target_name: Override target name (from config if not provided).
         base_url: Override base URL (from config if not provided).

@@ -17,13 +17,16 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .auth_scan import run_auth_scan
+from .auth_scan import AuthConfig, run_auth_scan
 from .chain_reasoning import run_recursive_chain_analysis
 from .chains import ChainConfig, run_chain_analysis, write_chain_report
 from .csrf_scan import run_csrf_scan
+from .dependency_audit import run_dependency_audit
+from .engagement import Engagement, EngagementError
 from .http_verb_scan import run_http_verb_scan
 from .idor_scan import run_idor_scan
 from .jwt_scan import run_jwt_scan
+from .rate_limit import run_rate_limit_scan
 from .stored_xss_scan import run_stored_xss_scan
 from .http_smoke import run_http_smoke
 from .injection_scanner import run_injection_scan
@@ -66,6 +69,30 @@ def handle_scan_command(args: object) -> int:
     smoke_artifact: Path | None = None  # Will hold the smoke scan JSON path
     auth_cookies: dict[str, str] = {}   # Will hold auth cookies from login
 
+    # Load engagement credentials if available
+    auth_config: AuthConfig | None = None
+    engagement: Engagement | None = None
+    if getattr(args, "engagement", None):  # type: ignore[attr-defined]
+        try:
+            engagement = Engagement.load(args.engagement)  # type: ignore[attr-defined]
+            # Try 'admin' role first, then 'user', then first available
+            for role in ("admin", "user"):
+                cred = engagement.get_credential(role)
+                if cred and cred.has_credentials():
+                    auth_config = AuthConfig(
+                        login_url="/login",
+                        username=cred.username,
+                        password=cred.password,
+                        cookie_name=cred.cookie_name or "authjs.session-token",
+                        protected_paths=engagement.scope.include_paths or ["/dashboard"],
+                    )
+                    print(f"  Loaded credentials from engagement (role: {role})")
+                    break
+            if not auth_config:
+                print("  WARNING: Engagement found but no valid credentials stored", file=sys.stderr)
+        except EngagementError as e:
+            print(f"  WARNING: Could not load engagement: {e}", file=sys.stderr)
+
     # ═══════════════════════════════════════════════════════════════
     # 1. HTTP smoke test (feeds surfaces to injection scanner)
     # ═══════════════════════════════════════════════════════════════
@@ -91,22 +118,23 @@ def handle_scan_command(args: object) -> int:
     if not getattr(args, "no_static", False):  # type: ignore[attr-defined]
         try:
             print("  [2/7] Static source scan (local LLM)...")
-            source_root = (
-                getattr(config, "source_dir", None) or "/home/beans/FinEase"
-            )
-            static = run_static_scan(
-                args.config,  # type: ignore[attr-defined]
-                source_root=source_root,
-                artifacts_root=str(out / "static"),
-                model=getattr(args, "model", None) or "local-qwen36-nvfp4",  # type: ignore[attr-defined]
-                max_turns=args.max_turns,  # type: ignore[attr-defined]
-                timeout_s=args.timeout,  # type: ignore[attr-defined]
-            )
-            for f in sorted((out / "static").glob("*/findings.json")):
-                with open(f) as sf:
-                    all_findings.extend(json.loads(sf.read()).get("findings", []))
-                break
-            print(f"    {static.finding_count} findings")
+            source_root = getattr(config, "source_dir", None)
+            if not source_root:
+                print("    SKIPPED: no sourceDir in target config", file=sys.stderr)
+            else:
+                static = run_static_scan(
+                    args.config,  # type: ignore[attr-defined]
+                    source_root=source_root,
+                    artifacts_root=str(out / "static"),
+                    model=getattr(args, "model", None) or "local-qwen36-nvfp4",  # type: ignore[attr-defined]
+                    max_turns=args.max_turns,  # type: ignore[attr-defined]
+                    timeout_s=args.timeout,  # type: ignore[attr-defined]
+                )
+                for f in sorted((out / "static").glob("*/findings.json")):
+                    with open(f) as sf:
+                        all_findings.extend(json.loads(sf.read()).get("findings", []))
+                    break
+                print(f"    {static.finding_count} findings")
         except Exception as e:  # noqa: BLE001
             print(f"    ERROR: {e}", file=sys.stderr)
 
@@ -121,15 +149,26 @@ def handle_scan_command(args: object) -> int:
                 args.config,  # type: ignore[attr-defined]
                 artifacts_root=str(out / "auth"),
                 request_timeout=args.request_timeout,  # type: ignore[attr-defined]
+                auth=auth_config,
             )
             for f in sorted((out / "auth").glob("*/auth-scan.json")):
                 with open(f) as sf:
                     data = json.loads(sf.read())
                     all_findings.extend(data.get("findings", []))
                     # Extract cookies for injection scanner
-                    for step in data.get("steps", []):
-                        if step.get("setCookies"):
-                            auth_cookies.update(step["setCookies"])
+                    # Auth scan nests steps under cookieTests, not at top level
+                    cookie_tests = data.get("cookieTests", {})
+                    if isinstance(cookie_tests, dict):
+                        for step in cookie_tests.get("steps", []):
+                            if step.get("setCookies"):
+                                auth_cookies.update(step["setCookies"])
+                    # Also check bypassTests and rateTests for cookies
+                    for test_key in ("bypassTests", "rateTests"):
+                        test_data = data.get(test_key, {})
+                        if isinstance(test_data, dict):
+                            for step in test_data.get("steps", []):
+                                if step.get("setCookies"):
+                                    auth_cookies.update(step["setCookies"])
                 break
             print(
                 f"    Cookie:{auth.cookie_tests} "
@@ -236,6 +275,45 @@ def handle_scan_command(args: object) -> int:
             print(f"    {name} ERROR: {e}", file=sys.stderr)
 
     # ═══════════════════════════════════════════════════════════════
+    # 5.6 Dependency audit (CVE cross-reference)
+    # ═══════════════════════════════════════════════════════════════
+    source_root = getattr(config, "source_dir", None)
+    if source_root:
+        try:
+            print("  [dependency-audit] Scanning dependencies for CVEs...")
+            dep_result = run_dependency_audit(
+                source_root,
+                artifacts_root=str(out / "dependency-audit"),
+            )
+            for f in sorted((out / "dependency-audit").glob("*/dependency-audit.json")):
+                with open(f) as sf:
+                    all_findings.extend(json.loads(sf.read()).get("findings", []))
+                break
+            print(f"    {dep_result.vulnerable_count} vulnerable / {dep_result.total_dependencies} total")
+        except Exception as e:  # noqa: BLE001
+            print(f"    dependency-audit ERROR: {e}", file=sys.stderr)
+    else:
+        print("  [dependency-audit] SKIPPED: no sourceDir in target config", file=sys.stderr)
+
+    # ═══════════════════════════════════════════════════════════════
+    # 5.7 Rate limit detection
+    # ═══════════════════════════════════════════════════════════════
+    try:
+        print("  [rate-limit] Testing rate limiting...")
+        rl_result = run_rate_limit_scan(
+            args.config,  # type: ignore[attr-defined]
+            artifacts_root=str(out / "rate-limit"),
+            request_timeout=args.request_timeout,  # type: ignore[attr-defined]
+        )
+        for f in sorted((out / "rate-limit").glob("*/rate-limit.json")):
+            with open(f) as sf:
+                all_findings.extend(json.loads(sf.read()).get("findings", []))
+            break
+        print(f"    {rl_result.endpoint_count} endpoints tested")
+    except Exception as e:  # noqa: BLE001
+        print(f"    rate-limit ERROR: {e}", file=sys.stderr)
+
+    # ═══════════════════════════════════════════════════════════════
     # 6. Vulnerability chain correlation (deterministic rules)
     # ═══════════════════════════════════════════════════════════════
     if not getattr(args, "no_chain", False) and all_findings:  # type: ignore[attr-defined]
@@ -255,9 +333,9 @@ def handle_scan_command(args: object) -> int:
             print(f"    Chain error: {e}", file=sys.stderr)
 
         # ═══════════════════════════════════════════════════════════
-        # 7. Recursive LLM-powered chain reasoning (optional)
+        # 7. Recursive LLM-powered chain reasoning (runs with ≥2 findings)
         # ═══════════════════════════════════════════════════════════
-        if not getattr(args, "no_chain", False) and all_findings and len(chains) > 0:  # type: ignore[name-defined]
+        if not getattr(args, "no_chain", False) and len(all_findings) >= 2:  # type: ignore[attr-defined]
             try:
                 print()
                 print("  [7/7] LLM chain reasoning (recursive) ...")
@@ -292,14 +370,16 @@ def handle_scan_command(args: object) -> int:
                 print(f"    LLM chain reasoning error: {e}", file=sys.stderr)
 
     # 8. Final report (deterministic CVSS)
-    if all_findings:
-        try:
-            print()
+    try:
+        print()
+        if all_findings:
             print("  Generating report (deterministic CVSS)...")
-            rp = write_report(all_findings, out / "report.md", config=ReportConfig())
-            print(f"  Report: {rp}: {len(all_findings)} findings")
-        except Exception as e:  # noqa: BLE001
-            print(f"  Report failed: {e}", file=sys.stderr)
+        else:
+            print("  Generating report (no findings — summary only)...")
+        rp = write_report(all_findings, out / "report.md", config=ReportConfig())
+        print(f"  Report: {rp}: {len(all_findings)} findings")
+    except Exception as e:  # noqa: BLE001
+        print(f"  Report failed: {e}", file=sys.stderr)
 
     print()
     print("Scan complete!")
